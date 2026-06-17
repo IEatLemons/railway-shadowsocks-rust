@@ -1,0 +1,20 @@
+proxies:
+  - name: railway-fixed-ip
+    type: ss
+    server: YOUR_RAILWAY_TCP_PROXY_HOST
+    port: YOUR_RAILWAY_TCP_PROXY_PORT
+    cipher: aes-256-gcm
+    password: YOUR_SS_PASSWORD
+    udp: false
+
+proxy-groups:
+  - name: FixedIP
+    type: select
+    proxies:
+      - railway-fixed-ip
+      - DIRECT
+
+rules:
+  - DOMAIN-SUFFIX,example.com,FixedIP
+  - DOMAIN,login.example.com,FixedIP
+  - MATCH,DIRECT
