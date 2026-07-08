@@ -130,7 +130,7 @@ async function resolveAddress(host: string): Promise<{ address: string; family: 
 }
 
 export async function sendManagerCommand(options: ManagerClientOptions, command: string): Promise<string> {
-  if (!options.host) throw new Error("Manager host is empty");
+  if (!options.host) throw new Error("管理接口地址为空");
 
   const target = await resolveAddress(options.host);
   const socket = dgram.createSocket(target.family === 6 ? "udp6" : "udp4");
@@ -149,7 +149,7 @@ export async function sendManagerCommand(options: ManagerClientOptions, command:
     };
 
     const timer = setTimeout(() => {
-      finish(new Error(`Manager command "${command}" timed out after ${options.timeoutMs}ms`));
+      finish(new Error(`管理接口命令 "${command}" 在 ${options.timeoutMs}ms 后超时`));
     }, options.timeoutMs);
 
     socket.once("message", (message) => finish(null, message.toString("utf8")));

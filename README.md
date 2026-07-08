@@ -1,98 +1,97 @@
-# Railway Shadowsocks-Rust Node
+# Railway Shadowsocks-Rust 节点
 
-This template deploys a private Shadowsocks server on Railway. ClashX can use it as an encrypted proxy node, and Railway Static Outbound IPs can make the target website see Railway's outbound IPs.
+这个模板会在 Railway 上部署一个私有 Shadowsocks 节点，并自带中文管理后台。电脑或手机需要安装支持 Shadowsocks 的客户端，然后把 Railway 的 TCP Proxy 地址、端口、加密方式和 `SS_PASSWORD` 填进去。
 
-## What This Does
+它不是完整 VPN，而是一个 TCP Shadowsocks 代理节点。通常用于让浏览器或应用的指定域名流量通过 Railway 出口访问目标网站；如果开启 Railway Static Outbound IPs，目标网站看到的会是 Railway 的出口 IP。
+
+## 工作方式
 
 ```text
-Browser
-  -> ClashX rule routing
+浏览器 / App
+  -> 本机代理客户端规则
   -> Railway TCP Proxy
-  -> shadowsocks-rust manager in Railway
-  -> target website
+  -> Railway 容器里的 shadowsocks-rust
+  -> 目标网站
 
-Admin browser
-  -> Railway HTTP domain on port 3000
-  -> bundled admin web
-  -> local shadowsocks-rust manager UDP API
+管理后台浏览器
+  -> Railway HTTP 域名，端口 3000
+  -> 内置中文管理后台
+  -> 容器内 ssmanager UDP 管理接口
 ```
 
-This is not a full VPN. It is a TCP Shadowsocks proxy intended for browser or app traffic that ClashX routes by domain.
+## Railway 部署
 
-## Railway Setup
-
-1. Create a new GitHub repository with these files.
-2. Create a Railway project from that repository.
-3. In the Railway service variables, add:
+1. 创建一个新的 GitHub 仓库，并放入本项目文件。
+2. 在 Railway 里从这个仓库创建项目。
+3. 在 Railway 服务变量中添加：
 
 ```text
-SS_PASSWORD=<use-a-long-random-password>
+SS_PASSWORD=<一段很长的随机密码>
 ADMIN_USERNAME=admin
-ADMIN_PASSWORD=<use-a-different-long-random-password>
+ADMIN_PASSWORD=<另一段很长的随机密码>
 ADMIN_PORT=3000
 SS_METHOD=aes-256-gcm
 SS_PORT=8388
 SS_TIMEOUT=300
 SS_MANAGER_PORT=6100
-PUBLIC_SS_HOST=<fill after TCP Proxy is created>
-PUBLIC_SS_PORT=<fill after TCP Proxy is created>
+PUBLIC_SS_HOST=<创建 TCP Proxy 后再填写>
+PUBLIC_SS_PORT=<创建 TCP Proxy 后再填写>
 DATA_DIR=/data
 ```
 
-`SS_PASSWORD` and `ADMIN_PASSWORD` are required. The other variables have defaults.
-Use a base64-style random password, for example one generated with:
+`SS_PASSWORD` 和 `ADMIN_PASSWORD` 必填，其他变量有默认值。可以用下面的命令生成随机密码：
 
 ```bash
 openssl rand -base64 32
 ```
 
-4. Deploy the service.
-5. Open the service networking settings.
-6. Add a public HTTP domain for the admin dashboard. If Railway asks which port to use, select or enter `3000`.
-7. Add a TCP Proxy for internal port `8388`.
-8. Copy the generated TCP proxy host and port, such as:
+4. 部署服务。
+5. 打开 Railway 服务的 Networking 页面。
+6. 创建一个公开 HTTP 域名给管理后台使用；如果 Railway 询问端口，选择或输入 `3000`。
+7. 创建一个 TCP Proxy，内部端口填 `8388`。
+8. 复制 TCP Proxy 生成的外部地址和端口，例如：
 
 ```text
 something.proxy.rlwy.net:12345
 ```
 
-9. Put those two values back into the service variables:
+9. 把这两个值写回 Railway 服务变量：
 
 ```text
 PUBLIC_SS_HOST=something.proxy.rlwy.net
 PUBLIC_SS_PORT=12345
 ```
 
-10. Redeploy so the admin dashboard can display the final ClashX config.
-11. Do not add a public TCP Proxy for `6100`. The manager port is UDP and only used inside the same container.
-12. If you need a fixed outbound IP, enable Static Outbound IPs for the Railway service and add all listed outbound IPs to the target website's allowlist.
+10. 重新部署服务，让管理后台能显示最终客户端配置。
+11. 不要给 `6100` 创建公开 TCP Proxy。`6100` 是容器内部 UDP 管理接口，只给后台读取状态用。
+12. 如果你需要固定出口 IP，在 Railway 服务里启用 Static Outbound IPs，并把 Railway 列出的所有出口 IP 加到目标网站白名单。
 
-## Admin Dashboard Setup
+## 管理后台
 
-The admin dashboard runs in the same Railway service as Shadowsocks.
-
-The same container listens on:
+同一个容器会监听：
 
 ```text
-3000/tcp  admin web dashboard
-8388/tcp  Shadowsocks proxy
-6100/udp  internal manager API
+3000/tcp  中文管理后台
+8388/tcp  Shadowsocks 代理入口
+6100/udp  容器内部管理接口
 ```
 
-To access the dashboard:
+打开后台：
 
-1. In the service's Networking page, use `Generate Domain`.
-2. Set the HTTP domain's target port to `3000`.
-3. Open the generated `https://...up.railway.app` URL.
-4. Log in with `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
+1. 在 Railway 服务 Networking 页面点击 `Generate Domain`。
+2. 确认这个 HTTP 域名指向端口 `3000`。
+3. 打开生成的 `https://...up.railway.app` 地址。
+4. 使用 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD` 登录。
 
-If you already created a HTTP domain that points to `8388`, delete it or edit it to point to `3000`. Port `8388` is not HTTP, so a browser cannot use it as the dashboard.
+如果你之前把 HTTP 域名指到了 `8388`，请删除或改成 `3000`。`8388` 不是 HTTP 服务，浏览器无法直接打开。
 
-Add a Railway volume mounted at `/data` if you want traffic history and events to survive restarts. The admin service stores traffic samples in SQLite at `${DATA_DIR}/admin.sqlite`. It never returns `SS_PASSWORD` through the web UI or API.
+建议添加一个 Railway Volume，并挂载到 `/data`。这样流量历史和事件记录会保存在 `${DATA_DIR}/admin.sqlite`，服务重启后不会丢。管理后台不会通过网页或 API 返回 `SS_PASSWORD` 明文。
 
-### Admin API
+后台里已经有“使用说明”区块，会直接告诉你电脑和手机怎么填。
 
-The dashboard uses these authenticated API endpoints:
+### 管理 API
+
+管理后台会使用这些需要登录态的 API：
 
 ```text
 POST /api/login
@@ -104,11 +103,62 @@ GET /api/client-config
 GET /api/events
 ```
 
-`/healthz` is unauthenticated for Railway health checks.
+`/healthz` 不需要登录，用于 Railway 健康检查。
 
-## ClashX Config
+## 电脑怎么使用
 
-Copy `clashx-example.yaml` into your ClashX profile and replace:
+你需要一个支持 Clash 配置或 Shadowsocks 的桌面客户端。
+
+最通用的方式：
+
+1. 登录管理后台。
+2. 点击“复制 Clash 配置”。
+3. 在电脑代理客户端中新建配置文件，把内容粘贴进去。
+4. 把配置里的 `YOUR_SS_PASSWORD` 改成 Railway 服务变量 `SS_PASSWORD` 的真实值。
+5. 把示例规则里的 `example.com` 改成你希望走代理的网站域名。
+6. 启用代理后，打开一个 IP 查询网站，确认出口 IP 变成 Railway 的出口 IP。
+
+如果你的客户端不支持 Clash 配置，就手动添加 Shadowsocks 节点：
+
+```text
+类型：Shadowsocks / SS
+服务器地址：PUBLIC_SS_HOST
+端口：PUBLIC_SS_PORT
+加密方式：SS_METHOD，默认 aes-256-gcm
+密码：SS_PASSWORD
+UDP：关闭
+```
+
+注意：客户端里要填的是 Railway TCP Proxy 给你的外部端口，也就是 `PUBLIC_SS_PORT`，不是容器内部的 `8388`。
+
+## 手机上怎么使用
+
+手机也需要安装支持 Shadowsocks 的客户端。
+
+手动添加节点时这样填：
+
+```text
+类型：Shadowsocks / SS
+服务器地址：PUBLIC_SS_HOST
+端口：PUBLIC_SS_PORT
+加密方式：SS_METHOD，默认 aes-256-gcm
+密码：SS_PASSWORD
+UDP：关闭
+```
+
+如果手机客户端支持 Clash 配置，也可以复制后台里的 Clash 配置，再把 `YOUR_SS_PASSWORD` 改成 Railway 变量里的真实密码。
+
+连接后用手机浏览器打开 IP 查询网站。如果出口 IP 没有变化，优先检查三件事：
+
+1. 手机客户端是否真的连接到这个节点。
+2. 端口是否填了 Railway TCP Proxy 的外部端口。
+3. 密码是否和 Railway 变量 `SS_PASSWORD` 完全一致。
+
+## Clash 配置示例
+
+本仓库提供了 `clashx-example.yaml`。你也可以直接从管理后台复制同样格式的配置。
+
+需要替换的值：
 
 ```text
 YOUR_RAILWAY_TCP_PROXY_HOST
@@ -116,7 +166,7 @@ YOUR_RAILWAY_TCP_PROXY_PORT
 YOUR_SS_PASSWORD
 ```
 
-Example:
+示例：
 
 ```yaml
 proxies:
@@ -129,7 +179,7 @@ proxies:
     udp: false
 ```
 
-Then add the target domains:
+按域名走代理：
 
 ```yaml
 rules:
@@ -138,7 +188,7 @@ rules:
   - MATCH,DIRECT
 ```
 
-If your profile uses a proxy group, route those domains to the group instead:
+如果你的配置里使用了代理组，可以把目标域名路由到代理组：
 
 ```yaml
 rules:
@@ -146,45 +196,46 @@ rules:
   - MATCH,DIRECT
 ```
 
-## Testing
+## 测试
 
-After ClashX is connected:
+客户端连接后：
 
-1. Open a site that shows your public IP.
-2. Temporarily route that site's domain to `railway-fixed-ip`.
-3. Confirm the shown IP is one of Railway's static outbound IPs.
-4. Test the actual target website.
+1. 打开一个显示公网 IP 的网站。
+2. 临时让这个网站的域名走 `railway-fixed-ip`。
+3. 确认显示的 IP 是 Railway 的出口 IP。
+4. 再测试真正的目标网站。
 
-For the admin service locally without Shadowsocks:
+本地只运行管理后台，不运行 Shadowsocks：
 
 ```bash
 cd admin
 ADMIN_PASSWORD=local-dev-password DATA_DIR=/tmp/ss-admin npm start
 ```
 
-Then open `http://127.0.0.1:3000`. Without a local `ssmanager` listening on UDP `6100`, the dashboard should show the node as offline and report the timeout reason.
+然后打开 `http://127.0.0.1:3000`。如果本地没有 UDP `6100` 的 `ssmanager`，后台会显示节点离线和超时原因，这是正常的。
 
-For the full Railway container locally, build and run the root Dockerfile, then open `http://127.0.0.1:3000` and connect ClashX to the exposed `8388` TCP port.
+本地运行完整容器时，构建根目录的 Dockerfile，打开 `http://127.0.0.1:3000`，并让客户端连接暴露出来的 `8388` TCP 端口。
 
-Run the admin tests with:
+运行后台测试：
 
 ```bash
 cd admin
 npm test
 ```
 
-## Security Notes
+## 安全注意事项
 
-- Use a long random `SS_PASSWORD`.
-- Use a separate long random `ADMIN_PASSWORD`.
-- Do not share the TCP proxy host, port, and password.
-- Do not expose `SS_MANAGER_PORT` publicly.
-- Do not deploy an unauthenticated HTTP or SOCKS proxy.
-- Rotate `SS_PASSWORD` if the node details are exposed.
+- `SS_PASSWORD` 使用长随机密码。
+- `ADMIN_PASSWORD` 使用另一段长随机密码，不要和 `SS_PASSWORD` 相同。
+- 不要公开 TCP Proxy 地址、端口和密码。
+- 不要公开 `SS_MANAGER_PORT`。
+- 不要部署没有认证的 HTTP 或 SOCKS 代理。
+- 如果节点信息泄露，立刻更换 `SS_PASSWORD` 并重新部署。
 
-## Known Railway Limits
+## Railway 限制
 
-- Railway TCP Proxy handles TCP. This template is intended for TCP traffic, and UDP is not exposed through Railway.
-- Railway Static Outbound IPs require a paid plan.
-- Railway may provide multiple outbound IPs for high availability. Add all of them to the target allowlist.
-- Railway static outbound IPs are for outbound traffic, not for connecting into the service. ClashX connects to the TCP proxy host and port.
+- Railway TCP Proxy 处理 TCP；这个模板按 TCP Shadowsocks 节点设计。
+- Railway 不会把 UDP 暴露给客户端，所以客户端里 UDP 请关闭。
+- Railway Static Outbound IPs 需要付费计划。
+- Railway 可能提供多个出口 IP。目标网站做白名单时，需要把它列出的所有出口 IP 都加进去。
+- Railway Static Outbound IPs 是出站 IP，不是客户端连入地址。客户端要连接的是 TCP Proxy 的 host 和 port。

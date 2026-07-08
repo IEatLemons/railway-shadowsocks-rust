@@ -166,7 +166,7 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
 
     if (lastError && shouldLogError(lastManagerError, lastError)) {
       lastManagerError = { message: lastError, ts: Date.now() };
-      store.recordEvent("error", "Manager connection failed", lastError);
+      store.recordEvent("error", "管理接口连接失败", lastError);
     }
 
     return {
@@ -201,13 +201,13 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
           safeEqualString(password, config.adminPassword);
 
         if (!valid) {
-          store.recordEvent("warn", "Admin login failed", { username });
+          store.recordEvent("warn", "管理员登录失败", { username });
           return json(res, 401, { error: "invalid_credentials" });
         }
 
         const token = sessions.create(config.adminUsername);
         setSessionCookie(res, token, config.cookieSecure);
-        store.recordEvent("info", "Admin login succeeded", { username: config.adminUsername });
+        store.recordEvent("info", "管理员登录成功", { username: config.adminUsername });
         return json(res, 200, { username: config.adminUsername });
       } catch (error) {
         return json(res, 400, { error: "bad_request", message: error instanceof Error ? error.message : String(error) });
@@ -295,7 +295,7 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
 
     if (url.pathname.startsWith("/api/")) {
       routeApi(req, res, url).catch((error) => {
-        store.recordEvent("error", "Unhandled API error", error instanceof Error ? error.stack : String(error));
+        store.recordEvent("error", "后台接口异常", error instanceof Error ? error.stack : String(error));
         json(res, 500, { error: "internal_error" });
       });
       return;
@@ -311,14 +311,14 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const server = createAdminServer(config, store);
 
   server.listen(config.port, () => {
-    store.recordEvent("info", "Admin service started", { port: config.port, dataDir: store.dataDir });
-    console.log(`Admin service listening on ${config.port}`);
+    store.recordEvent("info", "管理服务已启动", { port: config.port, dataDir: store.dataDir });
+    console.log(`管理服务正在监听 ${config.port}`);
   });
 
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.once(signal, () => {
       server.close(() => {
-        store.recordEvent("info", "Admin service stopped", { signal });
+        store.recordEvent("info", "管理服务已停止", { signal });
         store.close();
         process.exit(0);
       });

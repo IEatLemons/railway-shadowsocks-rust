@@ -69,23 +69,23 @@ export function getConfigWarnings(config: AppConfig): string[] {
   const warnings: string[] = [];
 
   if (!config.publicSsHost) {
-    warnings.push("PUBLIC_SS_HOST is not configured, so the client endpoint cannot be shown.");
+    warnings.push("尚未配置 PUBLIC_SS_HOST，后台暂时无法展示客户端服务器地址。");
   }
 
   if (!config.publicSsPort) {
-    warnings.push("PUBLIC_SS_PORT is not configured, so the client endpoint cannot be shown.");
+    warnings.push("尚未配置 PUBLIC_SS_PORT，后台暂时无法展示客户端端口。");
   }
 
   if (!config.managerHost) {
-    warnings.push("SS_MANAGER_HOST is not configured.");
+    warnings.push("尚未配置 SS_MANAGER_HOST。");
   }
 
   if (config.nodeEnv !== "production" && config.adminPassword === "admin") {
-    warnings.push("ADMIN_PASSWORD is using the local development default.");
+    warnings.push("ADMIN_PASSWORD 仍在使用本地开发默认值。");
   }
 
   if (config.ssPasswordConfigured === null) {
-    warnings.push("Admin cannot verify SS_PASSWORD because it is not shared with the admin service.");
+    warnings.push("后台无法确认 SS_PASSWORD 是否存在；请在 Railway 服务变量中检查。");
   }
 
   return warnings;
