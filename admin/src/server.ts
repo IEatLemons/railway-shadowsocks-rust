@@ -3,6 +3,7 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { clearSessionCookie, createSessionManager, getSessionToken, safeEqualString, setSessionCookie } from "./auth.ts";
+import { buildClientConfig, mergeClashConfig } from "./clientConfig.ts";
 import { getConfigWarnings, readConfig, type AppConfig } from "./config.ts";
 import { listServers, pingManager, type NormalizedServer } from "./managerClient.ts";
 import { openStore, type Store } from "./store.ts";
@@ -69,7 +70,11 @@ function mimeType(filePath: string): string {
 }
 
 function serveStatic(res: ServerResponse, pathname: string): void {
-  const normalized = pathname === "/" ? "/index.html" : pathname;
+  const normalized = pathname === "/"
+    ? "/index.html"
+    : pathname === "/guide" || pathname === "/guide/"
+      ? "/guide.html"
+      : pathname;
   const requested = path.normalize(normalized).replace(/^(\.\.[/\\])+/, "");
   const filePath = path.join(publicDir, requested);
 
@@ -82,47 +87,14 @@ function serveStatic(res: ServerResponse, pathname: string): void {
     ? filePath
     : path.join(publicDir, "index.html");
   const body = fs.readFileSync(target);
+  const noStore = target.endsWith("index.html") || target.endsWith("guide.html");
 
   res.writeHead(200, {
-    "Cache-Control": target.endsWith("index.html") ? "no-store" : "public, max-age=300",
+    "Cache-Control": noStore ? "no-store" : "public, max-age=300",
     "Content-Length": body.length,
     "Content-Type": mimeType(target)
   });
   res.end(body);
-}
-
-function buildClientConfig(config: AppConfig): JsonRecord {
-  const server = config.publicSsHost || "YOUR_RAILWAY_TCP_PROXY_HOST";
-  const port = config.publicSsPort || "YOUR_RAILWAY_TCP_PROXY_PORT";
-  const clashYaml = [
-    "proxies:",
-    "  - name: railway-fixed-ip",
-    "    type: ss",
-    `    server: ${server}`,
-    `    port: ${port}`,
-    `    cipher: ${config.ssMethod}`,
-    "    password: YOUR_SS_PASSWORD",
-    "    udp: false",
-    "",
-    "proxy-groups:",
-    "  - name: FixedIP",
-    "    type: select",
-    "    proxies:",
-    "      - railway-fixed-ip",
-    "      - DIRECT",
-    "",
-    "rules:",
-    "  - DOMAIN-SUFFIX,example.com,FixedIP",
-    "  - MATCH,DIRECT"
-  ].join("\n");
-
-  return {
-    clashYaml,
-    method: config.ssMethod,
-    publicHost: config.publicSsHost,
-    publicPort: config.publicSsPort,
-    ssPort: config.ssPort
-  };
 }
 
 function shouldLogError(last: { message: string; ts: number } | null, message: string): boolean {
@@ -227,7 +199,26 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
       return json(res, 200, { username: session.username });
     }
 
+    if (url.pathname === "/api/public-client-config") {
+      if (req.method !== "GET") return methodNotAllowed(res);
+      return json(res, 200, buildClientConfig(config));
+    }
+
     if (!requireSession(req, res)) return;
+
+    if (url.pathname === "/api/merge-client-config") {
+      if (req.method !== "POST") return methodNotAllowed(res);
+
+      try {
+        const body = await readJsonBody(req);
+        const merged = mergeClashConfig(String(body.baseConfig || ""), config, {
+          fixedIpDomains: body.fixedIpDomains
+        });
+        return json(res, 200, merged);
+      } catch (error) {
+        return json(res, 400, { error: "bad_request", message: error instanceof Error ? error.message : String(error) });
+      }
+    }
 
     if (url.pathname === "/api/status") {
       if (req.method !== "GET") return methodNotAllowed(res);

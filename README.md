@@ -87,7 +87,17 @@ PUBLIC_SS_PORT=12345
 
 建议添加一个 Railway Volume，并挂载到 `/data`。这样流量历史和事件记录会保存在 `${DATA_DIR}/admin.sqlite`，服务重启后不会丢。管理后台不会通过网页或 API 返回 `SS_PASSWORD` 明文。
 
-后台里已经有“使用说明”区块，会直接告诉你电脑和手机怎么填。
+使用说明已经独立成公开页面，不需要登录即可访问：
+
+```text
+https://你的后台域名/guide
+```
+
+管理后台里只保留“使用说明”入口。说明页会展示电脑和手机怎么填，也可以复制 Clash 配置；页面和 API 都不会返回 `SS_PASSWORD` 明文。
+
+后台首页提供“配置合并”工具。你可以把机场客户端当前使用的 Clash YAML 配置上传或粘贴进去，后台会把 Railway 节点追加为 `railway-fixed-ip`，并追加一个 `FixedIP` 代理组，最后输出一份合并后的 Clash 配置。可选填写要走 Railway 固定 IP 的域名，生成器会把这些规则插到 `MATCH` 规则之前。
+
+`SS_PASSWORD` 仍然不会由后台 API 返回。合并工具里的密码输入框只在浏览器本地把 `YOUR_SS_PASSWORD` 占位符替换成真实值，不会提交给后端；也可以不填，生成后手动替换。
 
 ### 管理 API
 
@@ -99,11 +109,19 @@ POST /api/logout
 GET /api/me
 GET /api/status
 GET /api/traffic?range=1h|24h|7d
-GET /api/client-config
 GET /api/events
+POST /api/merge-client-config
 ```
 
-`/healthz` 不需要登录，用于 Railway 健康检查。
+这些公开入口不需要登录：
+
+```text
+GET /guide
+GET /api/public-client-config
+GET /healthz
+```
+
+`/healthz` 用于 Railway 健康检查。`/api/client-config` 仍保留为登录后的兼容接口。
 
 ## 电脑怎么使用
 
@@ -111,7 +129,7 @@ GET /api/events
 
 最通用的方式：
 
-1. 登录管理后台。
+1. 打开 `/guide` 使用说明页面。
 2. 点击“复制 Clash 配置”。
 3. 在电脑代理客户端中新建配置文件，把内容粘贴进去。
 4. 把配置里的 `YOUR_SS_PASSWORD` 改成 Railway 服务变量 `SS_PASSWORD` 的真实值。

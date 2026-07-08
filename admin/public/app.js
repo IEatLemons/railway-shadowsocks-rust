@@ -24,10 +24,18 @@ const EVENT_MESSAGE_LABELS = {
 let state = {
   authed: false,
   busy: false,
+  merge: {
+    busy: false,
+    domains: "",
+    error: "",
+    input: "",
+    output: "",
+    password: "",
+    warnings: []
+  },
   range: "24h",
   status: null,
   traffic: null,
-  clientConfig: null,
   events: []
 };
 
@@ -99,6 +107,51 @@ async function api(path, options = {}) {
   return payload;
 }
 
+async function copyToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  textarea.remove();
+}
+
+async function copyFromButton(button, text, copiedText = "已复制") {
+  const originalText = button.textContent;
+  await copyToClipboard(text);
+  button.textContent = copiedText;
+  button.disabled = true;
+  window.setTimeout(() => {
+    button.textContent = originalText;
+    button.disabled = false;
+  }, 1200);
+}
+
+function withLocalPassword(yaml, password) {
+  if (!password) return yaml;
+  return yaml.replaceAll("YOUR_SS_PASSWORD", JSON.stringify(password));
+}
+
+function downloadTextFile(filename, text) {
+  const blob = new Blob([text], { type: "text/yaml;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 function drawChart(summary) {
   const points = summary?.points || [];
   if (points.length === 0) {
@@ -144,154 +197,54 @@ function metricCard(label, value, detail, statusClass = "") {
   `;
 }
 
-function getClientFields(status, clientConfig) {
-  const host = clientConfig?.publicHost || status?.shadowsocks?.publicHost || "";
-  const port = clientConfig?.publicPort || status?.shadowsocks?.publicPort || "";
-  const method = clientConfig?.method || status?.shadowsocks?.method || "";
-  const passwordConfigured = status?.shadowsocks?.passwordConfigured;
-  const passwordHint = passwordConfigured === false
-    ? "未检测到 SS_PASSWORD，请先在 Railway 变量中设置"
-    : "使用 Railway 服务变量 SS_PASSWORD 的值";
-
-  return {
-    host,
-    method,
-    passwordHint,
-    port,
-    type: "Shadowsocks / SS",
-    udp: "关闭"
-  };
-}
-
-function fieldValue(value, fallback = "未配置") {
-  return value ? escapeHtml(value) : `<span class="missing">${escapeHtml(fallback)}</span>`;
-}
-
-function buildManualConfigText(status, clientConfig) {
-  const fields = getClientFields(status, clientConfig);
-  return [
-    "类型：Shadowsocks / SS",
-    `服务器地址：${fields.host || "请先配置 PUBLIC_SS_HOST"}`,
-    `端口：${fields.port || "请先配置 PUBLIC_SS_PORT"}`,
-    `加密方式：${fields.method || "aes-256-gcm"}`,
-    "密码：Railway 服务变量 SS_PASSWORD 的值（后台不会显示明文）",
-    "UDP：关闭"
-  ].join("\n");
-}
-
-function renderManualFields(status, clientConfig) {
-  const fields = getClientFields(status, clientConfig);
+function renderMergePanel() {
+  const merge = state.merge;
+  const canUseOutput = Boolean(merge.output);
 
   return `
-    <dl class="config-list">
-      <div>
-        <dt>类型</dt>
-        <dd><code>${escapeHtml(fields.type)}</code></dd>
-      </div>
-      <div>
-        <dt>服务器地址</dt>
-        <dd><code>${fieldValue(fields.host, "未配置 PUBLIC_SS_HOST")}</code></dd>
-      </div>
-      <div>
-        <dt>端口</dt>
-        <dd><code>${fieldValue(fields.port, "未配置 PUBLIC_SS_PORT")}</code></dd>
-      </div>
-      <div>
-        <dt>加密方式</dt>
-        <dd><code>${fieldValue(fields.method)}</code></dd>
-      </div>
-      <div>
-        <dt>密码</dt>
-        <dd>${escapeHtml(fields.passwordHint)}</dd>
-      </div>
-      <div>
-        <dt>UDP</dt>
-        <dd><code>${escapeHtml(fields.udp)}</code></dd>
-      </div>
-    </dl>
-  `;
-}
-
-function renderUsageGuide(status, clientConfig) {
-  return `
-    <section class="panel guide-panel">
+    <section class="panel merge-panel">
       <div class="panel-header">
-        <h2>使用说明</h2>
-        <button id="copy-manual">复制填写信息</button>
+        <h2>配置合并</h2>
+        <div class="merge-actions">
+          <button id="merge-generate" class="primary" ${merge.busy ? "disabled" : ""}>${merge.busy ? "生成中" : "生成最终配置"}</button>
+          <button id="merge-copy" ${canUseOutput ? "" : "disabled"}>复制结果</button>
+          <button id="merge-download" ${canUseOutput ? "" : "disabled"}>下载 YAML</button>
+          <button id="merge-clear">清空</button>
+        </div>
       </div>
 
-      <div class="guide-intro">
-        这个服务不是完整 VPN，而是一个私有 Shadowsocks 节点。电脑或手机需要安装支持 Shadowsocks 的客户端，然后把下面的节点信息填进去。
+      <div class="merge-grid">
+        <div class="field">
+          <label for="merge-file">配置文件</label>
+          <input id="merge-file" type="file" accept=".yaml,.yml,.txt,.conf">
+        </div>
+        <div class="field">
+          <label for="merge-domains">固定 IP 域名</label>
+          <input id="merge-domains" value="${escapeHtml(merge.domains)}" placeholder="example.com, api.example.com">
+        </div>
+        <div class="field">
+          <label for="merge-password">SS_PASSWORD（可选）</label>
+          <input id="merge-password" type="password" value="${escapeHtml(merge.password)}" placeholder="只在浏览器替换占位符">
+        </div>
       </div>
 
-      <div class="guide-grid">
-        <section class="guide-section">
-          <h3>先确认</h3>
-          <ol>
-            <li>Railway 的 HTTP 域名指向管理后台端口 <code>3000</code>。</li>
-            <li>Railway 的 TCP Proxy 指向 Shadowsocks 端口 <code>8388</code>。</li>
-            <li><code>PUBLIC_SS_HOST</code> 和 <code>PUBLIC_SS_PORT</code> 填的是 TCP Proxy 给你的外部地址和端口。</li>
-            <li>密码用 Railway 变量里的 <code>SS_PASSWORD</code>，后台不会显示明文密码。</li>
-          </ol>
-        </section>
+      ${merge.error ? `<div class="warning">${escapeHtml(merge.error)}</div>` : ""}
+      ${merge.warnings.length > 0
+        ? `<div class="merge-warnings">${merge.warnings.map((warning) => `<div class="subtle">${escapeHtml(warning)}</div>`).join("")}</div>`
+        : ""}
 
-        <section class="guide-section">
-          <h3>电脑</h3>
-          <ol>
-            <li>安装支持 Clash 或 Shadowsocks 的客户端。</li>
-            <li>如果客户端支持 Clash 配置，复制右侧“Clash 配置”，新建配置文件后粘贴进去。</li>
-            <li>把配置里的 <code>YOUR_SS_PASSWORD</code> 改成 Railway 变量 <code>SS_PASSWORD</code> 的真实值。</li>
-            <li>把示例规则 <code>example.com</code> 改成你要走代理的网站域名，或在客户端里切到全局模式。</li>
-            <li>启用代理后打开 IP 查询网站，确认出口 IP 变成 Railway 的出口 IP。</li>
-          </ol>
-        </section>
-
-        <section class="guide-section">
-          <h3>手机</h3>
-          <ol>
-            <li>安装支持 Shadowsocks 的手机客户端。</li>
-            <li>新建节点，类型选择 <code>Shadowsocks</code> 或 <code>SS</code>。</li>
-            <li>按下面“手动填写信息”逐项填写服务器地址、端口、加密方式和密码。</li>
-            <li>UDP 关闭；保存后连接节点。</li>
-            <li>手机浏览器打开 IP 查询网站，确认出口 IP 正常变化。</li>
-          </ol>
-        </section>
+      <div class="merge-editors">
+        <div class="field">
+          <label for="merge-input">当前 Clash 配置</label>
+          <textarea id="merge-input" spellcheck="false" placeholder="粘贴当前正在使用的 Clash YAML 配置">${escapeHtml(merge.input)}</textarea>
+        </div>
+        <div class="field">
+          <label for="merge-output">最终 Clash 配置</label>
+          <textarea id="merge-output" spellcheck="false" readonly placeholder="生成后显示">${escapeHtml(merge.output)}</textarea>
+        </div>
       </div>
-
-      <section class="manual-section">
-        <h3>手动填写信息</h3>
-        ${renderManualFields(status, clientConfig)}
-      </section>
     </section>
   `;
-}
-
-async function copyToClipboard(text) {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "");
-  textarea.style.position = "fixed";
-  textarea.style.left = "-9999px";
-  document.body.appendChild(textarea);
-  textarea.select();
-  document.execCommand("copy");
-  textarea.remove();
-}
-
-async function copyFromButton(button, text, copiedText = "已复制") {
-  const originalText = button.textContent;
-  await copyToClipboard(text);
-  button.textContent = copiedText;
-  button.disabled = true;
-  window.setTimeout(() => {
-    button.textContent = originalText;
-    button.disabled = false;
-  }, 1200);
 }
 
 function renderLogin(error = "") {
@@ -310,6 +263,7 @@ function renderLogin(error = "") {
         </div>
         <div class="error">${escapeHtml(error)}</div>
         <button class="primary" type="submit">登录</button>
+        <a class="login-guide-link" href="/guide">不用登录，查看使用说明</a>
       </form>
     </main>
   `;
@@ -336,7 +290,6 @@ function renderLogin(error = "") {
 function renderDashboard() {
   const status = state.status;
   const traffic = state.traffic;
-  const clientConfig = state.clientConfig;
   const online = Boolean(status?.manager?.online);
   const endpoint = status?.shadowsocks?.publicHost && status?.shadowsocks?.publicPort
     ? `${status.shadowsocks.publicHost}:${status.shadowsocks.publicPort}`
@@ -355,7 +308,7 @@ function renderDashboard() {
         </div>
         <div class="actions">
           <button id="refresh">刷新</button>
-          <button id="copy-config">复制 Clash 配置</button>
+          <a class="button-link" href="/guide" target="_blank" rel="noopener">使用说明</a>
           <button id="logout">退出登录</button>
         </div>
       </header>
@@ -372,7 +325,7 @@ function renderDashboard() {
           ${metricCard("后台运行时间", escapeHtml(formatDuration(status?.admin?.uptimeSeconds)), `启动于 ${formatTime(status?.admin?.startedAt)}`)}
         </section>
 
-        ${renderUsageGuide(status, clientConfig)}
+        ${renderMergePanel()}
 
         <section class="layout">
           <section class="panel">
@@ -386,12 +339,6 @@ function renderDashboard() {
           </section>
 
           <section class="stack">
-            <section class="panel">
-              <div class="panel-header">
-                <h2>Clash 配置</h2>
-              </div>
-              <pre>${escapeHtml(clientConfig?.clashYaml || "")}</pre>
-            </section>
             <section class="panel">
               <div class="panel-header">
                 <h2>配置提醒</h2>
@@ -457,31 +404,83 @@ function renderDashboard() {
     state.authed = false;
     renderLogin();
   });
-  document.querySelector("#copy-config").addEventListener("click", async (event) => {
-    await copyFromButton(event.currentTarget, clientConfig?.clashYaml || "", "配置已复制");
-  });
-  document.querySelector("#copy-manual").addEventListener("click", async (event) => {
-    await copyFromButton(event.currentTarget, buildManualConfigText(status, clientConfig), "信息已复制");
-  });
   for (const button of document.querySelectorAll("[data-range]")) {
     button.addEventListener("click", async () => {
       state.range = button.dataset.range;
       await refreshAll();
     });
   }
+
+  document.querySelector("#merge-file").addEventListener("change", async (event) => {
+    const file = event.currentTarget.files?.[0];
+    if (!file) return;
+    state.merge.input = await file.text();
+    state.merge.output = "";
+    state.merge.error = "";
+    state.merge.warnings = [];
+    renderDashboard();
+  });
+
+  document.querySelector("#merge-generate").addEventListener("click", async () => {
+    state.merge.input = document.querySelector("#merge-input").value;
+    state.merge.domains = document.querySelector("#merge-domains").value;
+    state.merge.password = document.querySelector("#merge-password").value;
+    state.merge.busy = true;
+    state.merge.error = "";
+    renderDashboard();
+
+    try {
+      const merged = await api("/api/merge-client-config", {
+        method: "POST",
+        body: JSON.stringify({
+          baseConfig: state.merge.input,
+          fixedIpDomains: state.merge.domains
+        })
+      });
+
+      state.merge.output = withLocalPassword(merged.clashYaml || "", state.merge.password);
+      state.merge.warnings = merged.warnings || [];
+    } catch (error) {
+      state.merge.error = error instanceof Error ? error.message : "配置合并失败";
+    } finally {
+      state.merge.busy = false;
+      renderDashboard();
+    }
+  });
+
+  document.querySelector("#merge-copy").addEventListener("click", async (event) => {
+    if (!state.merge.output) return;
+    await copyFromButton(event.currentTarget, state.merge.output, "结果已复制");
+  });
+
+  document.querySelector("#merge-download").addEventListener("click", () => {
+    if (!state.merge.output) return;
+    downloadTextFile("clash-railway-merged.yaml", state.merge.output);
+  });
+
+  document.querySelector("#merge-clear").addEventListener("click", () => {
+    state.merge = {
+      busy: false,
+      domains: "",
+      error: "",
+      input: "",
+      output: "",
+      password: "",
+      warnings: []
+    };
+    renderDashboard();
+  });
 }
 
 async function refreshAll() {
   state.busy = true;
-  const [status, traffic, clientConfig, events] = await Promise.all([
+  const [status, traffic, events] = await Promise.all([
     api("/api/status"),
     api(`/api/traffic?range=${encodeURIComponent(state.range)}`),
-    api("/api/client-config"),
     api("/api/events")
   ]);
   state.status = status;
   state.traffic = traffic;
-  state.clientConfig = clientConfig;
   state.events = events.events || [];
   state.busy = false;
   renderDashboard();
