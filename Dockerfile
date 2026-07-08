@@ -10,15 +10,20 @@ RUN if [ -n "${SHADOWSOCKS_RUST_VERSION}" ]; then \
       cargo install shadowsocks-rust --features full; \
     fi
 
-FROM alpine:3.24
+FROM node:24-alpine3.23
 
 RUN apk add --no-cache ca-certificates
 
 COPY --from=builder /usr/local/cargo/bin/ssmanager /usr/bin/ssmanager
 
+WORKDIR /app
+
+COPY admin/package.json /app/admin/package.json
+COPY admin/src /app/admin/src
+COPY admin/public /app/admin/public
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-EXPOSE 8388/tcp 6100/udp
+EXPOSE 3000/tcp 8388/tcp 6100/udp
 
 ENTRYPOINT ["/entrypoint.sh"]

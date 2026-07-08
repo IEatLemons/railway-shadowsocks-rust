@@ -12,9 +12,9 @@ Browser
   -> target website
 
 Admin browser
-  -> Railway HTTP service
-  -> Railway Private Networking
-  -> shadowsocks-rust manager UDP API
+  -> Railway HTTP domain on port 3000
+  -> bundled admin web
+  -> local shadowsocks-rust manager UDP API
 ```
 
 This is not a full VPN. It is a TCP Shadowsocks proxy intended for browser or app traffic that ClashX routes by domain.
@@ -27,13 +27,19 @@ This is not a full VPN. It is a TCP Shadowsocks proxy intended for browser or ap
 
 ```text
 SS_PASSWORD=<use-a-long-random-password>
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=<use-a-different-long-random-password>
+ADMIN_PORT=3000
 SS_METHOD=aes-256-gcm
 SS_PORT=8388
 SS_TIMEOUT=300
 SS_MANAGER_PORT=6100
+PUBLIC_SS_HOST=<fill after TCP Proxy is created>
+PUBLIC_SS_PORT=<fill after TCP Proxy is created>
+DATA_DIR=/data
 ```
 
-Only `SS_PASSWORD` is required. The other variables have defaults.
+`SS_PASSWORD` and `ADMIN_PASSWORD` are required. The other variables have defaults.
 Use a base64-style random password, for example one generated with:
 
 ```bash
@@ -42,42 +48,47 @@ openssl rand -base64 32
 
 4. Deploy the service.
 5. Open the service networking settings.
-6. Add a TCP Proxy for internal port `8388`.
-7. Copy the generated TCP proxy host and port, such as:
+6. Add a public HTTP domain for the admin dashboard. If Railway asks which port to use, select or enter `3000`.
+7. Add a TCP Proxy for internal port `8388`.
+8. Copy the generated TCP proxy host and port, such as:
 
 ```text
 something.proxy.rlwy.net:12345
 ```
 
-8. Do not add a public TCP Proxy for `6100`. The manager port is UDP and should only be reached through Railway Private Networking.
-9. If you need a fixed outbound IP, enable Static Outbound IPs for the Railway service and add all listed outbound IPs to the target website's allowlist.
+9. Put those two values back into the service variables:
+
+```text
+PUBLIC_SS_HOST=something.proxy.rlwy.net
+PUBLIC_SS_PORT=12345
+```
+
+10. Redeploy so the admin dashboard can display the final ClashX config.
+11. Do not add a public TCP Proxy for `6100`. The manager port is UDP and only used inside the same container.
+12. If you need a fixed outbound IP, enable Static Outbound IPs for the Railway service and add all listed outbound IPs to the target website's allowlist.
 
 ## Admin Dashboard Setup
 
-This repository also includes a standalone admin service in `admin/`. Deploy it as a second Railway service in the same project or environment.
+The admin dashboard runs in the same Railway service as Shadowsocks.
 
-1. Create a new Railway service from the same GitHub repository.
-2. Set the service root directory to `admin`.
-3. Add these service variables:
+The same container listens on:
 
 ```text
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=<use-a-different-long-random-password>
-SS_MANAGER_HOST=<your-shadowsocks-service-name>.railway.internal
-SS_MANAGER_PORT=6100
-PUBLIC_SS_HOST=<your Railway TCP proxy host>
-PUBLIC_SS_PORT=<your Railway TCP proxy port>
-SS_METHOD=aes-256-gcm
-SS_PORT=8388
-SS_TIMEOUT=300
-DATA_DIR=/data
+3000/tcp  admin web dashboard
+8388/tcp  Shadowsocks proxy
+6100/udp  internal manager API
 ```
 
-4. Add a Railway volume mounted at `/data` if you want traffic history and events to survive restarts.
-5. Enable a public HTTP domain for the admin service.
-6. Log in with `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
+To access the dashboard:
 
-The admin service stores traffic samples in SQLite at `${DATA_DIR}/admin.sqlite`. It never returns `SS_PASSWORD` through the web UI or API. If you want the dashboard to show that the Shadowsocks password is configured, set `SS_PASSWORD_CONFIGURED=true` on the admin service.
+1. In the service's Networking page, use `Generate Domain`.
+2. Set the HTTP domain's target port to `3000`.
+3. Open the generated `https://...up.railway.app` URL.
+4. Log in with `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
+
+If you already created a HTTP domain that points to `8388`, delete it or edit it to point to `3000`. Port `8388` is not HTTP, so a browser cannot use it as the dashboard.
+
+Add a Railway volume mounted at `/data` if you want traffic history and events to survive restarts. The admin service stores traffic samples in SQLite at `${DATA_DIR}/admin.sqlite`. It never returns `SS_PASSWORD` through the web UI or API.
 
 ### Admin API
 
@@ -144,7 +155,7 @@ After ClashX is connected:
 3. Confirm the shown IP is one of Railway's static outbound IPs.
 4. Test the actual target website.
 
-For the admin service locally:
+For the admin service locally without Shadowsocks:
 
 ```bash
 cd admin
@@ -152,6 +163,8 @@ ADMIN_PASSWORD=local-dev-password DATA_DIR=/tmp/ss-admin npm start
 ```
 
 Then open `http://127.0.0.1:3000`. Without a local `ssmanager` listening on UDP `6100`, the dashboard should show the node as offline and report the timeout reason.
+
+For the full Railway container locally, build and run the root Dockerfile, then open `http://127.0.0.1:3000` and connect ClashX to the exposed `8388` TCP port.
 
 Run the admin tests with:
 
