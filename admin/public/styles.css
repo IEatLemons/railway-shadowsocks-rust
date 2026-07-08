@@ -29,6 +29,7 @@ body {
 button,
 a.button-link,
 input,
+select,
 textarea {
   font: inherit;
 }
@@ -90,6 +91,42 @@ button:disabled {
   flex-wrap: wrap;
   gap: 10px;
   justify-content: flex-end;
+}
+
+.topbar-controls {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.top-nav {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: inline-flex;
+  overflow: hidden;
+}
+
+.nav-link {
+  align-items: center;
+  color: var(--muted);
+  display: inline-flex;
+  font-weight: 700;
+  min-height: 38px;
+  padding: 0 14px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.nav-link + .nav-link {
+  border-left: 1px solid var(--line);
+}
+
+.nav-link.active {
+  background: var(--ink);
+  color: #fff;
 }
 
 .dashboard {
@@ -159,6 +196,10 @@ button:disabled {
   background: var(--red);
 }
 
+.dot.warning {
+  background: var(--amber);
+}
+
 .layout {
   display: grid;
   gap: 16px;
@@ -225,6 +266,21 @@ code {
   width: 100%;
 }
 
+.chart-axis {
+  stroke: #cbd5df;
+}
+
+.chart-axis-label {
+  fill: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.chart-grid {
+  stroke: var(--line);
+  stroke-dasharray: 4 6;
+}
+
 .chart-empty {
   color: var(--muted);
 }
@@ -239,11 +295,116 @@ code {
   gap: 14px;
 }
 
+.tools-header h2 {
+  font-size: 20px;
+  margin: 0;
+}
+
+.tools-list {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.tool-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  color: var(--text);
+  display: grid;
+  gap: 8px;
+  min-height: 110px;
+  padding: 16px;
+  text-decoration: none;
+}
+
+.tool-card:hover,
+.nav-link:hover {
+  text-decoration: none;
+}
+
+.tool-title {
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.tool-detail,
+.breadcrumbs {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.breadcrumbs {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.breadcrumbs a {
+  color: var(--blue);
+  text-decoration: none;
+}
+
+.empty-state {
+  align-items: flex-start;
+  display: grid;
+  gap: 12px;
+}
+
+.empty-state h2 {
+  font-size: 18px;
+  margin: 0;
+}
+
 .merge-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   justify-content: flex-end;
+}
+
+.user-form {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(180px, 1fr) minmax(220px, 1.4fr) minmax(120px, 0.6fr) minmax(120px, 0.6fr) auto;
+}
+
+.user-form .field {
+  margin-bottom: 0;
+}
+
+.form-actions {
+  align-items: end;
+  display: flex;
+}
+
+.subscription-result {
+  display: grid;
+  gap: 12px;
+}
+
+.subscription-links {
+  display: grid;
+  gap: 12px;
+}
+
+.copy-row {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.copy-row code {
+  min-height: 38px;
+  padding: 9px 10px;
+}
+
+.small-link {
+  min-height: 32px;
+  padding: 0 10px;
 }
 
 .merge-grid {
@@ -458,6 +619,7 @@ a.button-link:hover {
 }
 
 .field input,
+.field select,
 .field textarea {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -491,6 +653,8 @@ a.button-link:hover {
   .merge-editors,
   .merge-grid,
   .metrics,
+  .tools-list,
+  .user-form,
   .layout {
     grid-template-columns: 1fr;
   }
@@ -502,6 +666,10 @@ a.button-link:hover {
   .topbar {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .topbar-controls {
+    justify-content: flex-start;
   }
 
   .actions {
@@ -529,6 +697,17 @@ a.button-link:hover {
 
   .actions {
     width: 100%;
+  }
+
+  .topbar-controls,
+  .top-nav {
+    width: 100%;
+  }
+
+  .nav-link {
+    flex: 1;
+    justify-content: center;
+    padding: 0 10px;
   }
 
   .actions button {

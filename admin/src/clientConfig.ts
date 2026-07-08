@@ -14,6 +14,11 @@ export type MergeClientConfigResult = {
   warnings: string[];
 };
 
+export type SubscriptionUser = {
+  id: string;
+  name: string;
+};
+
 type TopLevelSection = {
   key: string | null;
   lines: string[];
@@ -24,17 +29,40 @@ function yamlScalar(value: string): string {
   return JSON.stringify(value);
 }
 
-function buildRailwayProxyBlock(config: AppConfig): string[] {
+function base64Url(value: string): string {
+  return Buffer.from(value, "utf8")
+    .toString("base64")
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/, "");
+}
+
+function subscriptionNodeName(user: SubscriptionUser): string {
+  const normalized = user.name.trim().replace(/\s+/g, "-") || user.id.slice(0, 8);
+  return `railway-user-${normalized}`;
+}
+
+function formatServerHost(host: string): string {
+  if (host.includes(":") && !host.startsWith("[") && !host.endsWith("]")) return `[${host}]`;
+  return host;
+}
+
+function buildRailwayProxyBlock(
+  config: AppConfig,
+  options: { name?: string; password?: string } = {}
+): string[] {
   const server = config.publicSsHost || "YOUR_RAILWAY_TCP_PROXY_HOST";
   const port = config.publicSsPort || "YOUR_RAILWAY_TCP_PROXY_PORT";
+  const name = options.name || "railway-fixed-ip";
+  const password = options.password || "YOUR_SS_PASSWORD";
 
   return [
-    "  - name: railway-fixed-ip",
+    `  - name: ${yamlScalar(name)}`,
     "    type: ss",
     `    server: ${yamlScalar(server)}`,
     `    port: ${/^\d+$/.test(port) ? port : yamlScalar(port)}`,
     `    cipher: ${yamlScalar(config.ssMethod)}`,
-    "    password: YOUR_SS_PASSWORD",
+    `    password: ${yamlScalar(password)}`,
     "    udp: false"
   ];
 }
@@ -77,6 +105,41 @@ export function buildClientConfig(config: AppConfig): ClientConfigPayload {
     publicPort: config.publicSsPort,
     ssPort: config.ssPort
   };
+}
+
+export function buildUserClashYaml(config: AppConfig, user: SubscriptionUser): string {
+  const nodeName = subscriptionNodeName(user);
+
+  return [
+    "proxies:",
+    ...buildRailwayProxyBlock(config, {
+      name: nodeName,
+      password: config.ssPassword
+    }),
+    "",
+    "proxy-groups:",
+    "  - name: Proxy",
+    "    type: select",
+    "    proxies:",
+    `      - ${yamlScalar(nodeName)}`,
+    "      - DIRECT",
+    "",
+    "rules:",
+    "  - MATCH,Proxy",
+    ""
+  ].join("\n");
+}
+
+export function buildUserSsUri(config: AppConfig, user: SubscriptionUser): string {
+  const userInfo = base64Url(`${config.ssMethod}:${config.ssPassword}`);
+  const host = formatServerHost(config.publicSsHost || "YOUR_RAILWAY_TCP_PROXY_HOST");
+  const port = config.publicSsPort || "YOUR_RAILWAY_TCP_PROXY_PORT";
+  const fragment = encodeURIComponent(subscriptionNodeName(user));
+  return `ss://${userInfo}@${host}:${port}#${fragment}`;
+}
+
+export function buildUserSsSubscription(config: AppConfig, user: SubscriptionUser): string {
+  return Buffer.from(`${buildUserSsUri(config, user)}\n`, "utf8").toString("base64");
 }
 
 function topLevelKey(line: string): string | null {

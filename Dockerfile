@@ -19,6 +19,7 @@ COPY --from=builder /usr/local/cargo/bin/ssmanager /usr/bin/ssmanager
 WORKDIR /app
 
 COPY admin/package.json /app/admin/package.json
+RUN cd /app/admin && npm install --omit=dev
 COPY admin/src /app/admin/src
 COPY admin/public /app/admin/public
 COPY entrypoint.sh /entrypoint.sh

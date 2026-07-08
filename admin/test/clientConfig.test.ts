@@ -1,6 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildStandaloneClashYaml, mergeClashConfig, normalizeFixedIpDomains } from "../src/clientConfig.ts";
+import {
+  buildStandaloneClashYaml,
+  buildUserClashYaml,
+  buildUserSsSubscription,
+  mergeClashConfig,
+  normalizeFixedIpDomains
+} from "../src/clientConfig.ts";
 import { readConfig } from "../src/config.ts";
 
 function testConfig() {
@@ -8,7 +14,8 @@ function testConfig() {
     ADMIN_PASSWORD: "secret",
     PUBLIC_SS_HOST: "tcp.example.com",
     PUBLIC_SS_PORT: "12345",
-    SS_METHOD: "chacha20-ietf-poly1305"
+    SS_METHOD: "chacha20-ietf-poly1305",
+    SS_PASSWORD: "server-secret"
   });
 }
 
@@ -86,4 +93,17 @@ test("normalizes fixed ip domain input", () => {
     normalizeFixedIpDomains("DOMAIN-SUFFIX,Example.COM\nhttps://api.example.com/path\nbad value"),
     ["example.com", "api.example.com"]
   );
+});
+
+test("builds per-user subscription payloads with the real server password", () => {
+  const user = { id: "user-1", name: "Alice Zhang" };
+  const clash = buildUserClashYaml(testConfig(), user);
+  const ssSubscription = buildUserSsSubscription(testConfig(), user);
+  const ssUri = Buffer.from(ssSubscription, "base64").toString("utf8");
+
+  assert.match(clash, /name: railway-user-Alice-Zhang/);
+  assert.match(clash, /password: server-secret/);
+  assert.doesNotMatch(clash, /YOUR_SS_PASSWORD/);
+  assert.match(ssUri, /^ss:\/\//);
+  assert.match(ssUri, /@tcp\.example\.com:12345#railway-user-Alice-Zhang/);
 });

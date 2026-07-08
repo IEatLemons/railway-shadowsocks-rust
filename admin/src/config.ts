@@ -3,6 +3,7 @@ export type AppConfig = {
   adminUsername: string;
   cookieSecure: boolean;
   dataDir: string;
+  databaseUrl: string;
   managerHost: string;
   managerPort: number;
   managerTimeoutMs: number;
@@ -12,6 +13,7 @@ export type AppConfig = {
   publicSsPort: string;
   sampleIntervalMs: number;
   ssMethod: string;
+  ssPassword: string;
   ssPasswordConfigured: boolean | null;
   ssPort: number;
   ssTimeout: number;
@@ -50,6 +52,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     adminUsername: env.ADMIN_USERNAME || "admin",
     cookieSecure: nodeEnv === "production",
     dataDir: env.DATA_DIR || "/data",
+    databaseUrl: env.DATABASE_URL || "",
     managerHost: env.SS_MANAGER_HOST || "127.0.0.1",
     managerPort: readNumber(env, "SS_MANAGER_PORT", 6100),
     managerTimeoutMs: readNumber(env, "SS_MANAGER_TIMEOUT_MS", 2500),
@@ -59,6 +62,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     publicSsPort: env.PUBLIC_SS_PORT || "",
     sampleIntervalMs: readNumber(env, "SAMPLE_INTERVAL_MS", 15000),
     ssMethod: env.SS_METHOD || "aes-256-gcm",
+    ssPassword: env.SS_PASSWORD || "",
     ssPasswordConfigured,
     ssPort: readNumber(env, "SS_PORT", 8388),
     ssTimeout: readNumber(env, "SS_TIMEOUT", 300)
@@ -86,6 +90,10 @@ export function getConfigWarnings(config: AppConfig): string[] {
 
   if (config.ssPasswordConfigured === null) {
     warnings.push("后台无法确认 SS_PASSWORD 是否存在；请在 Railway 服务变量中检查。");
+  }
+
+  if (!config.ssPassword) {
+    warnings.push("尚未向管理后台传入 SS_PASSWORD，多用户订阅地址无法生成可用配置。");
   }
 
   return warnings;

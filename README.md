@@ -37,9 +37,10 @@ SS_MANAGER_PORT=6100
 PUBLIC_SS_HOST=<创建 TCP Proxy 后再填写>
 PUBLIC_SS_PORT=<创建 TCP Proxy 后再填写>
 DATA_DIR=/data
+DATABASE_URL=<可选，Railway PostgreSQL 连接串>
 ```
 
-`SS_PASSWORD` 和 `ADMIN_PASSWORD` 必填，其他变量有默认值。可以用下面的命令生成随机密码：
+`SS_PASSWORD` 和 `ADMIN_PASSWORD` 必填，其他变量有默认值。`DATABASE_URL` 不填时会继续使用 `/data/admin.sqlite`；接入 Railway PostgreSQL 后会使用 PostgreSQL 保存用户、订阅 token 和访问记录。可以用下面的命令生成随机密码：
 
 ```bash
 openssl rand -base64 32
@@ -85,7 +86,7 @@ PUBLIC_SS_PORT=12345
 
 如果你之前把 HTTP 域名指到了 `8388`，请删除或改成 `3000`。`8388` 不是 HTTP 服务，浏览器无法直接打开。
 
-建议添加一个 Railway Volume，并挂载到 `/data`。这样流量历史和事件记录会保存在 `${DATA_DIR}/admin.sqlite`，服务重启后不会丢。管理后台不会通过网页或 API 返回 `SS_PASSWORD` 明文。
+建议添加一个 Railway Volume，并挂载到 `/data`。这样流量历史和事件记录会保存在 `${DATA_DIR}/admin.sqlite`，服务重启后不会丢。如果设置了 `DATABASE_URL`，后台会优先使用 PostgreSQL。
 
 使用说明已经独立成公开页面，不需要登录即可访问：
 
@@ -93,9 +94,22 @@ PUBLIC_SS_PORT=12345
 https://你的后台域名/guide
 ```
 
-管理后台里只保留“使用说明”入口。说明页会展示电脑和手机怎么填，也可以复制 Clash 配置；页面和 API 都不会返回 `SS_PASSWORD` 明文。
+管理后台里提供“用户”“使用说明”和“工具”入口。说明页会展示电脑和手机怎么填，也可以复制 Clash 配置；公开说明页和 `/api/public-client-config` 不会返回 `SS_PASSWORD` 明文。
 
-后台首页提供“配置合并”工具。你可以把机场客户端当前使用的 Clash YAML 配置上传或粘贴进去，后台会把 Railway 节点追加为 `railway-fixed-ip`，并追加一个 `FixedIP` 代理组，最后输出一份合并后的 Clash 配置。可选填写要走 Railway 固定 IP 的域名，生成器会把这些规则插到 `MATCH` 规则之前。
+### 多用户订阅
+
+后台“用户”页面可以创建多个用户。每个用户会得到独立订阅地址：
+
+```text
+https://你的后台域名/sub/<token>/clash.yaml
+https://你的后台域名/sub/<token>/ss.txt
+```
+
+订阅 token 只保存哈希，完整地址只会在创建用户或重置订阅时显示一次。订阅地址本身会返回带真实 `SS_PASSWORD` 的可用配置，谁拿到地址谁就能使用节点，请像密码一样保管。
+
+第一版仍然是共享一个 Railway TCP Proxy 和一个 Shadowsocks 端口。后台可以记录每个用户的订阅拉取记录，也可以停用用户让订阅接口不再返回配置；但已经导入过配置的客户端可能继续使用共享密码连接。当前 shadowsocks-rust 管理接口返回的是按端口统计的流量，不能可靠区分共享端口下每个用户的真实代理流量。未来要精确按用户统计和超额断开，需要迁移到“每用户独立端口/密码”的模式。
+
+后台“工具”板块提供独立的“配置合并”页面。你可以把机场客户端当前使用的 Clash YAML 配置上传或粘贴进去，后台会把 Railway 节点追加为 `railway-fixed-ip`，并追加一个 `FixedIP` 代理组，最后输出一份合并后的 Clash 配置。可选填写要走 Railway 固定 IP 的域名，生成器会把这些规则插到 `MATCH` 规则之前。
 
 `SS_PASSWORD` 仍然不会由后台 API 返回。合并工具里的密码输入框只在浏览器本地把 `YOUR_SS_PASSWORD` 占位符替换成真实值，不会提交给后端；也可以不填，生成后手动替换。
 
@@ -110,6 +124,11 @@ GET /api/me
 GET /api/status
 GET /api/traffic?range=1h|24h|7d
 GET /api/events
+GET /api/users
+POST /api/users
+GET /api/users/:id
+PATCH /api/users/:id
+POST /api/users/:id/token/reset
 POST /api/merge-client-config
 ```
 
@@ -118,6 +137,8 @@ POST /api/merge-client-config
 ```text
 GET /guide
 GET /api/public-client-config
+GET /sub/:token/clash.yaml
+GET /sub/:token/ss.txt
 GET /healthz
 ```
 

@@ -79,3 +79,82 @@ test("serves public usage config without an admin session", async () => {
     store.close();
   }
 });
+
+test("creates per-user subscription URLs and gates disabled users", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-admin-server-"));
+  const config = readConfig({
+    ADMIN_PASSWORD: "secret",
+    DATA_DIR: dir,
+    PUBLIC_SS_HOST: "tcp.example.com",
+    PUBLIC_SS_PORT: "12345",
+    SS_METHOD: "aes-256-gcm",
+    SS_PASSWORD: "server-secret"
+  });
+  const store = openStore(dir);
+  const server = createAdminServer(config, store);
+  const baseUrl = await listen(server);
+
+  try {
+    const publicResponse = await fetch(`${baseUrl}/api/public-client-config`);
+    assert.equal(publicResponse.status, 200);
+    assert.doesNotMatch(await publicResponse.text(), /server-secret/);
+
+    const loginResponse = await fetch(`${baseUrl}/api/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: "admin", password: "secret" })
+    });
+    assert.equal(loginResponse.status, 200);
+    const cookie = loginResponse.headers.get("set-cookie")?.split(";")[0] || "";
+    assert.ok(cookie);
+
+    const createResponse = await fetch(`${baseUrl}/api/users`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: cookie
+      },
+      body: JSON.stringify({ name: "Alice" })
+    });
+    assert.equal(createResponse.status, 201);
+    const created = await createResponse.json();
+    assert.match(created.subscription.clashUrl, /\/sub\/.+\/clash\.yaml$/);
+    assert.match(created.subscription.ssUrl, /\/sub\/.+\/ss\.txt$/);
+
+    const clashResponse = await fetch(created.subscription.clashUrl);
+    assert.equal(clashResponse.status, 200);
+    const clash = await clashResponse.text();
+    assert.match(clash, /railway-user-Alice/);
+    assert.match(clash, /password: server-secret/);
+
+    const ssResponse = await fetch(created.subscription.ssUrl);
+    assert.equal(ssResponse.status, 200);
+    const ssText = Buffer.from(await ssResponse.text(), "base64").toString("utf8");
+    assert.match(ssText, /^ss:\/\//);
+    assert.match(ssText, /@tcp\.example\.com:12345#railway-user-Alice/);
+
+    const detailResponse = await fetch(`${baseUrl}/api/users/${encodeURIComponent(created.user.id)}`, {
+      headers: { Cookie: cookie }
+    });
+    assert.equal(detailResponse.status, 200);
+    const detail = await detailResponse.json();
+    assert.equal(detail.accessLogs.length, 2);
+    assert.equal(detail.trafficMode.perUserReliable, false);
+
+    const disableResponse = await fetch(`${baseUrl}/api/users/${encodeURIComponent(created.user.id)}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: cookie
+      },
+      body: JSON.stringify({ status: "disabled" })
+    });
+    assert.equal(disableResponse.status, 200);
+
+    const disabledClashResponse = await fetch(created.subscription.clashUrl);
+    assert.equal(disabledClashResponse.status, 403);
+  } finally {
+    await close(server);
+    store.close();
+  }
+});

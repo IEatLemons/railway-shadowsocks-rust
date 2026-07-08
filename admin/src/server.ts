@@ -3,10 +3,10 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { clearSessionCookie, createSessionManager, getSessionToken, safeEqualString, setSessionCookie } from "./auth.ts";
-import { buildClientConfig, mergeClashConfig } from "./clientConfig.ts";
+import { buildClientConfig, buildUserClashYaml, buildUserSsSubscription, mergeClashConfig } from "./clientConfig.ts";
 import { getConfigWarnings, readConfig, type AppConfig } from "./config.ts";
 import { listServers, pingManager, type NormalizedServer } from "./managerClient.ts";
-import { openStore, type Store } from "./store.ts";
+import { hashSubscriptionToken, openConfiguredStore, type CreatedSubscription, type Store, type UserStatus } from "./store.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -39,6 +39,15 @@ function text(res: ServerResponse, status: number, body: string): void {
     "Cache-Control": "no-store",
     "Content-Length": Buffer.byteLength(body),
     "Content-Type": "text/plain; charset=utf-8"
+  });
+  res.end(body);
+}
+
+function content(res: ServerResponse, status: number, body: string, contentType: string): void {
+  res.writeHead(status, {
+    "Cache-Control": "no-store",
+    "Content-Length": Buffer.byteLength(body),
+    "Content-Type": contentType
   });
   res.end(body);
 }
@@ -103,6 +112,56 @@ function shouldLogError(last: { message: string; ts: number } | null, message: s
   return Date.now() - last.ts > 60_000;
 }
 
+function firstHeaderValue(value: string | string[] | undefined): string {
+  const raw = Array.isArray(value) ? value[0] : value;
+  return String(raw || "").split(",")[0].trim();
+}
+
+function requestIp(req: IncomingMessage): string | null {
+  return firstHeaderValue(req.headers["x-forwarded-for"]) || req.socket.remoteAddress || null;
+}
+
+function subscriptionBaseUrl(req: IncomingMessage, config: AppConfig): string {
+  const host = req.headers.host || "localhost";
+  const forwardedProto = firstHeaderValue(req.headers["x-forwarded-proto"]);
+  const proto = forwardedProto || (config.cookieSecure ? "https" : "http");
+  return `${proto}://${host}`;
+}
+
+function subscriptionUrls(req: IncomingMessage, config: AppConfig, token: string): {
+  clashUrl: string;
+  ssUrl: string;
+} {
+  const baseUrl = subscriptionBaseUrl(req, config);
+  const encoded = encodeURIComponent(token);
+  return {
+    clashUrl: `${baseUrl}/sub/${encoded}/clash.yaml`,
+    ssUrl: `${baseUrl}/sub/${encoded}/ss.txt`
+  };
+}
+
+function subscriptionPayload(req: IncomingMessage, config: AppConfig, created: CreatedSubscription): {
+  clashUrl: string;
+  ssUrl: string;
+} {
+  return subscriptionUrls(req, config, created.token);
+}
+
+function subscriptionReady(config: AppConfig): string | null {
+  if (!config.publicSsHost) return "PUBLIC_SS_HOST is not configured";
+  if (!config.publicSsPort) return "PUBLIC_SS_PORT is not configured";
+  if (!config.ssPassword) return "SS_PASSWORD is not available to the admin service";
+  return null;
+}
+
+function userTrafficMode() {
+  return {
+    mode: "shared_port",
+    perUserReliable: false,
+    message: "当前为共享端口模式，后台只能记录端口总流量，不能可靠区分每个用户的代理流量。"
+  };
+}
+
 export function createAdminServer(config: AppConfig, store: Store): http.Server {
   const sessions = createSessionManager();
   let lastManagerError: { message: string; ts: number } | null = null;
@@ -123,7 +182,7 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
       const ping = await pingManager(options);
       pingRaw = ping.raw;
       totalBytes = ping.stat.totalBytes;
-      if (Object.keys(ping.stat.ports).length > 0) store.recordSample(ping.stat);
+      if (Object.keys(ping.stat.ports).length > 0) await store.recordSample(ping.stat);
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
     }
@@ -138,7 +197,7 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
 
     if (lastError && shouldLogError(lastManagerError, lastError)) {
       lastManagerError = { message: lastError, ts: Date.now() };
-      store.recordEvent("error", "管理接口连接失败", lastError);
+      await store.recordEvent("error", "管理接口连接失败", lastError);
     }
 
     return {
@@ -160,6 +219,50 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
     return true;
   }
 
+  async function routeSubscription(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
+    const match = /^\/sub\/([^/]+)\/(clash\.yaml|ss\.txt)$/.exec(url.pathname);
+    if (!match) return false;
+
+    if (req.method !== "GET") {
+      methodNotAllowed(res);
+      return true;
+    }
+
+    const token = decodeURIComponent(match[1]);
+    const format = match[2] === "clash.yaml" ? "clash" : "ss";
+    const found = await store.findSubscriptionByTokenHash(hashSubscriptionToken(token));
+
+    if (!found) {
+      text(res, 404, "Subscription not found");
+      return true;
+    }
+
+    await store.recordSubscriptionAccess(found.user.id, found.tokenRecord.id, {
+      format,
+      ip: requestIp(req),
+      userAgent: String(req.headers["user-agent"] || "")
+    });
+
+    if (found.tokenRecord.revoked || found.user.status !== "active") {
+      text(res, 403, "Subscription is disabled");
+      return true;
+    }
+
+    const notReady = subscriptionReady(config);
+    if (notReady) {
+      text(res, 503, notReady);
+      return true;
+    }
+
+    if (format === "clash") {
+      content(res, 200, buildUserClashYaml(config, found.user), "text/yaml; charset=utf-8");
+      return true;
+    }
+
+    content(res, 200, buildUserSsSubscription(config, found.user), "text/plain; charset=utf-8");
+    return true;
+  }
+
   async function routeApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
     if (url.pathname === "/api/login") {
       if (req.method !== "POST") return methodNotAllowed(res);
@@ -173,13 +276,13 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
           safeEqualString(password, config.adminPassword);
 
         if (!valid) {
-          store.recordEvent("warn", "管理员登录失败", { username });
+          await store.recordEvent("warn", "管理员登录失败", { username });
           return json(res, 401, { error: "invalid_credentials" });
         }
 
         const token = sessions.create(config.adminUsername);
         setSessionCookie(res, token, config.cookieSecure);
-        store.recordEvent("info", "管理员登录成功", { username: config.adminUsername });
+        await store.recordEvent("info", "管理员登录成功", { username: config.adminUsername });
         return json(res, 200, { username: config.adminUsername });
       } catch (error) {
         return json(res, 400, { error: "bad_request", message: error instanceof Error ? error.message : String(error) });
@@ -206,6 +309,86 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
 
     if (!requireSession(req, res)) return;
 
+    if (url.pathname === "/api/users") {
+      if (req.method === "GET") {
+        const users = await store.listUsers();
+        return json(res, 200, {
+          storage: {
+            backend: store.backend,
+            dataDir: store.dataDir
+          },
+          trafficMode: userTrafficMode(),
+          users
+        });
+      }
+
+      if (req.method === "POST") {
+        try {
+          const body = await readJsonBody(req);
+          const created = await store.createUser(body);
+          await store.recordEvent("info", "用户已创建", { userId: created.user.id, name: created.user.name });
+          return json(res, 201, {
+            subscription: subscriptionPayload(req, config, created),
+            trafficMode: userTrafficMode(),
+            user: created.user
+          });
+        } catch (error) {
+          return json(res, 400, { error: "bad_request", message: error instanceof Error ? error.message : String(error) });
+        }
+      }
+
+      return methodNotAllowed(res);
+    }
+
+    const resetTokenMatch = /^\/api\/users\/([^/]+)\/token\/reset$/.exec(url.pathname);
+    if (resetTokenMatch) {
+      if (req.method !== "POST") return methodNotAllowed(res);
+      const userId = decodeURIComponent(resetTokenMatch[1]);
+      const created = await store.resetSubscriptionToken(userId);
+      if (!created) return json(res, 404, { error: "not_found" });
+
+      await store.recordEvent("info", "用户订阅地址已重置", { userId: created.user.id, name: created.user.name });
+      return json(res, 200, {
+        subscription: subscriptionPayload(req, config, created),
+        trafficMode: userTrafficMode(),
+        user: created.user
+      });
+    }
+
+    const userMatch = /^\/api\/users\/([^/]+)$/.exec(url.pathname);
+    if (userMatch) {
+      const userId = decodeURIComponent(userMatch[1]);
+
+      if (req.method === "GET") {
+        const range = url.searchParams.get("range") || "24h";
+        const detail = await store.getUserDetail(userId);
+        if (!detail) return json(res, 404, { error: "not_found" });
+        return json(res, 200, {
+          ...detail,
+          sharedTraffic: await store.getTraffic(range),
+          trafficMode: userTrafficMode(),
+          userTraffic: await store.getTrafficByUser(userId, range)
+        });
+      }
+
+      if (req.method === "PATCH") {
+        try {
+          const body = await readJsonBody(req);
+          let user = await store.updateUser(userId, body);
+          if (body.status !== undefined) {
+            user = await store.setUserStatus(userId, String(body.status) as UserStatus);
+          }
+          if (!user) return json(res, 404, { error: "not_found" });
+          await store.recordEvent("info", "用户已更新", { userId: user.id, name: user.name, status: user.status });
+          return json(res, 200, { trafficMode: userTrafficMode(), user });
+        } catch (error) {
+          return json(res, 400, { error: "bad_request", message: error instanceof Error ? error.message : String(error) });
+        }
+      }
+
+      return methodNotAllowed(res);
+    }
+
     if (url.pathname === "/api/merge-client-config") {
       if (req.method !== "POST") return methodNotAllowed(res);
 
@@ -223,7 +406,7 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
     if (url.pathname === "/api/status") {
       if (req.method !== "GET") return methodNotAllowed(res);
       const snapshot = await readManagerSnapshot();
-      const latestSamples = store.getLatestSamples();
+      const latestSamples = await store.getLatestSamples();
       return json(res, 200, {
         admin: {
           dataDir: store.dataDir,
@@ -249,18 +432,22 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
           ssPort: config.ssPort,
           timeout: config.ssTimeout
         },
+        storage: {
+          backend: store.backend,
+          dataDir: store.dataDir
+        },
         servers: snapshot.servers,
         traffic: {
           currentTotalBytes: snapshot.totalBytes,
           latestSamples,
-          recordedTotalBytes: store.getRecordedTotalBytes()
+          recordedTotalBytes: await store.getRecordedTotalBytes()
         }
       });
     }
 
     if (url.pathname === "/api/traffic") {
       if (req.method !== "GET") return methodNotAllowed(res);
-      return json(res, 200, store.getTraffic(url.searchParams.get("range") || "24h"));
+      return json(res, 200, await store.getTraffic(url.searchParams.get("range") || "24h"));
     }
 
     if (url.pathname === "/api/client-config") {
@@ -270,7 +457,7 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
 
     if (url.pathname === "/api/events") {
       if (req.method !== "GET") return methodNotAllowed(res);
-      return json(res, 200, { events: store.getEvents(100) });
+      return json(res, 200, { events: await store.getEvents(100) });
     }
 
     return json(res, 404, { error: "not_found" });
@@ -284,9 +471,21 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
       return json(res, 200, { ok: true });
     }
 
+    if (url.pathname.startsWith("/sub/")) {
+      routeSubscription(req, res, url)
+        .then((handled) => {
+          if (!handled) text(res, 404, "Subscription not found");
+        })
+        .catch((error) => {
+          void store.recordEvent("error", "订阅接口异常", error instanceof Error ? error.stack : String(error));
+          text(res, 500, "Internal error");
+        });
+      return;
+    }
+
     if (url.pathname.startsWith("/api/")) {
       routeApi(req, res, url).catch((error) => {
-        store.recordEvent("error", "后台接口异常", error instanceof Error ? error.stack : String(error));
+        void store.recordEvent("error", "后台接口异常", error instanceof Error ? error.stack : String(error));
         json(res, 500, { error: "internal_error" });
       });
       return;
@@ -298,19 +497,19 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const config = readConfig();
-  const store = openStore(config.dataDir);
+  const store = await openConfiguredStore(config);
   const server = createAdminServer(config, store);
 
   server.listen(config.port, () => {
-    store.recordEvent("info", "管理服务已启动", { port: config.port, dataDir: store.dataDir });
+    void store.recordEvent("info", "管理服务已启动", { port: config.port, dataDir: store.dataDir, backend: store.backend });
     console.log(`管理服务正在监听 ${config.port}`);
   });
 
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.once(signal, () => {
-      server.close(() => {
-        store.recordEvent("info", "管理服务已停止", { signal });
-        store.close();
+      server.close(async () => {
+        await store.recordEvent("info", "管理服务已停止", { signal });
+        await store.close();
         process.exit(0);
       });
     });
