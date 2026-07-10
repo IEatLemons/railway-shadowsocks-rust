@@ -107,3 +107,36 @@ test("builds per-user subscription payloads with the real server password", () =
   assert.match(ssUri, /^ss:\/\//);
   assert.match(ssUri, /@tcp\.example\.com:12345#railway-user-Alice-Zhang/);
 });
+
+test("builds per-user subscriptions with multiple assigned nodes", () => {
+  const user = { id: "user-1", name: "Alice" };
+  const nodes = [
+    {
+      method: "aes-256-gcm",
+      nodeId: "node-1",
+      nodeName: "hk-1",
+      password: "node-one-pass",
+      publicHost: "hk.example.com",
+      publicPort: 20001
+    },
+    {
+      method: "chacha20-ietf-poly1305",
+      nodeId: "node-2",
+      nodeName: "jp-1",
+      password: "node-two-pass",
+      publicHost: "jp.example.com",
+      publicPort: 21001
+    }
+  ];
+
+  const clash = buildUserClashYaml(testConfig(), user, nodes);
+  assert.match(clash, /railway-hk-1-Alice-20001/);
+  assert.match(clash, /server: hk\.example\.com/);
+  assert.match(clash, /password: node-one-pass/);
+  assert.match(clash, /railway-jp-1-Alice-21001/);
+  assert.match(clash, /cipher: chacha20-ietf-poly1305/);
+
+  const ssText = Buffer.from(buildUserSsSubscription(testConfig(), user, nodes), "base64").toString("utf8");
+  assert.match(ssText, /@hk\.example\.com:20001#railway-hk-1-Alice-20001/);
+  assert.match(ssText, /@jp\.example\.com:21001#railway-jp-1-Alice-21001/);
+});

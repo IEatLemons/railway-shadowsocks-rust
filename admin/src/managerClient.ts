@@ -25,6 +25,15 @@ export type NormalizedServer = {
   raw: unknown;
 };
 
+export type ManagerServerConfig = {
+  method?: string;
+  mode?: string;
+  password: string;
+  server?: string;
+  serverPort: number;
+  timeout?: number;
+};
+
 function parseJsonLike(value: string): unknown {
   const trimmed = value.trim();
   if (!trimmed) return null;
@@ -183,4 +192,22 @@ export async function listServers(options: ManagerClientOptions): Promise<{
     raw,
     servers: normalizeServers(parsed.payload)
   };
+}
+
+export async function addServer(options: ManagerClientOptions, server: ManagerServerConfig): Promise<string> {
+  const payload: Record<string, unknown> = {
+    password: server.password,
+    server_port: server.serverPort
+  };
+
+  if (server.method) payload.method = server.method;
+  if (server.mode) payload.mode = server.mode;
+  if (server.server) payload.server = server.server;
+  if (server.timeout) payload.timeout = server.timeout;
+
+  return await sendManagerCommand(options, `add: ${JSON.stringify(payload)}`);
+}
+
+export async function removeServer(options: ManagerClientOptions, serverPort: number | string): Promise<string> {
+  return await sendManagerCommand(options, `remove: ${JSON.stringify({ server_port: Number(serverPort) })}`);
 }

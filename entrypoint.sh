@@ -1,13 +1,11 @@
 #!/bin/sh
 set -eu
 
-: "${SS_PASSWORD:?SS_PASSWORD is required}"
-: "${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}"
-
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
+APP_ROLE="${APP_ROLE:-all}"
 ADMIN_PORT="${ADMIN_PORT:-3000}"
 ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
 DATA_DIR="${DATA_DIR:-/data}"
@@ -23,7 +21,23 @@ PUBLIC_SS_HOST="${PUBLIC_SS_HOST:-}"
 PUBLIC_SS_PORT="${PUBLIC_SS_PORT:-}"
 SS_PASSWORD_CONFIGURED="${SS_PASSWORD_CONFIGURED:-true}"
 
-SS_PASSWORD_JSON="$(json_escape "$SS_PASSWORD")"
+case "${APP_ROLE}" in
+  all)
+    : "${SS_PASSWORD:?SS_PASSWORD is required}"
+    : "${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}"
+    ;;
+  node-agent)
+    : "${ADMIN_BASE_URL:?ADMIN_BASE_URL is required}"
+    : "${NODE_ID:?NODE_ID is required}"
+    : "${NODE_TOKEN:?NODE_TOKEN is required}"
+    ;;
+  *)
+    echo "Unsupported APP_ROLE: ${APP_ROLE}" >&2
+    exit 1
+    ;;
+esac
+
+SS_PASSWORD_JSON="$(json_escape "${SS_PASSWORD:-}")"
 SS_METHOD_JSON="$(json_escape "$SS_METHOD")"
 SS_BIND_ADDRESS_JSON="$(json_escape "$SS_BIND_ADDRESS")"
 SS_MODE_JSON="$(json_escape "$SS_MODE")"
@@ -33,7 +47,16 @@ mkdir -p /etc/shadowsocks-rust
 mkdir -p "${DATA_DIR}" || DATA_DIR="/tmp/railway-shadowsocks-admin"
 mkdir -p "${DATA_DIR}"
 
-cat > /etc/shadowsocks-rust/config.json <<EOF
+if [ "${APP_ROLE}" = "node-agent" ]; then
+  cat > /etc/shadowsocks-rust/config.json <<EOF
+{
+  "manager_address": "${SS_MANAGER_BIND_ADDRESS_JSON}",
+  "manager_port": ${SS_MANAGER_PORT},
+  "servers": []
+}
+EOF
+else
+  cat > /etc/shadowsocks-rust/config.json <<EOF
 {
   "manager_address": "${SS_MANAGER_BIND_ADDRESS_JSON}",
   "manager_port": ${SS_MANAGER_PORT},
@@ -49,11 +72,15 @@ cat > /etc/shadowsocks-rust/config.json <<EOF
   ]
 }
 EOF
+fi
 
 shutdown() {
   echo "Stopping services"
   if [ -n "${ADMIN_PID:-}" ]; then
     kill "${ADMIN_PID}" 2>/dev/null || true
+  fi
+  if [ -n "${AGENT_PID:-}" ]; then
+    kill "${AGENT_PID}" 2>/dev/null || true
   fi
   if [ -n "${SSMANAGER_PID:-}" ]; then
     kill "${SSMANAGER_PID}" 2>/dev/null || true
@@ -67,27 +94,44 @@ echo "Starting shadowsocks-rust manager on ${SS_MANAGER_BIND_ADDRESS}:${SS_MANAG
 ssmanager -c /etc/shadowsocks-rust/config.json &
 SSMANAGER_PID="$!"
 
-echo "Starting admin web on 0.0.0.0:${ADMIN_PORT}"
-(
-  cd /app/admin
-  ADMIN_USERNAME="${ADMIN_USERNAME}" \
-  ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
-  DATA_DIR="${DATA_DIR}" \
-  DATABASE_URL="${DATABASE_URL:-}" \
-  NODE_ENV=production \
-  PORT="${ADMIN_PORT}" \
-  PUBLIC_SS_HOST="${PUBLIC_SS_HOST}" \
-  PUBLIC_SS_PORT="${PUBLIC_SS_PORT}" \
-  SS_PASSWORD="${SS_PASSWORD}" \
-  SS_MANAGER_HOST="${SS_MANAGER_HOST}" \
-  SS_MANAGER_PORT="${SS_MANAGER_PORT}" \
-  SS_METHOD="${SS_METHOD}" \
-  SS_PASSWORD_CONFIGURED="${SS_PASSWORD_CONFIGURED}" \
-  SS_PORT="${SS_PORT}" \
-  SS_TIMEOUT="${SS_TIMEOUT}" \
-  node --experimental-strip-types src/server.ts
-) &
-ADMIN_PID="$!"
+if [ "${APP_ROLE}" = "node-agent" ]; then
+  echo "Starting node agent for ${NODE_ID}"
+  (
+    cd /app/admin
+    ADMIN_BASE_URL="${ADMIN_BASE_URL}" \
+    AGENT_INTERVAL_MS="${AGENT_INTERVAL_MS:-15000}" \
+    NODE_ID="${NODE_ID}" \
+    NODE_TOKEN="${NODE_TOKEN}" \
+    SS_BIND_ADDRESS="${SS_BIND_ADDRESS}" \
+    SS_MANAGER_HOST="${SS_MANAGER_HOST}" \
+    SS_MANAGER_PORT="${SS_MANAGER_PORT}" \
+    SS_MANAGER_TIMEOUT_MS="${SS_MANAGER_TIMEOUT_MS:-2500}" \
+    node --experimental-strip-types src/nodeAgent.ts
+  ) &
+  AGENT_PID="$!"
+else
+  echo "Starting admin web on 0.0.0.0:${ADMIN_PORT}"
+  (
+    cd /app/admin
+    ADMIN_USERNAME="${ADMIN_USERNAME}" \
+    ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
+    DATA_DIR="${DATA_DIR}" \
+    DATABASE_URL="${DATABASE_URL:-}" \
+    NODE_ENV=production \
+    PORT="${ADMIN_PORT}" \
+    PUBLIC_SS_HOST="${PUBLIC_SS_HOST}" \
+    PUBLIC_SS_PORT="${PUBLIC_SS_PORT}" \
+    SS_PASSWORD="${SS_PASSWORD}" \
+    SS_MANAGER_HOST="${SS_MANAGER_HOST}" \
+    SS_MANAGER_PORT="${SS_MANAGER_PORT}" \
+    SS_METHOD="${SS_METHOD}" \
+    SS_PASSWORD_CONFIGURED="${SS_PASSWORD_CONFIGURED}" \
+    SS_PORT="${SS_PORT}" \
+    SS_TIMEOUT="${SS_TIMEOUT}" \
+    node --experimental-strip-types src/server.ts
+  ) &
+  ADMIN_PID="$!"
+fi
 
 while :; do
   if ! kill -0 "${SSMANAGER_PID}" 2>/dev/null; then
@@ -98,11 +142,19 @@ while :; do
     exit "${status}"
   fi
 
-  if ! kill -0 "${ADMIN_PID}" 2>/dev/null; then
+  if [ -n "${ADMIN_PID:-}" ] && ! kill -0 "${ADMIN_PID}" 2>/dev/null; then
     echo "admin web exited"
     shutdown
     status=0
     wait "${ADMIN_PID}" || status="$?"
+    exit "${status}"
+  fi
+
+  if [ -n "${AGENT_PID:-}" ] && ! kill -0 "${AGENT_PID}" 2>/dev/null; then
+    echo "node agent exited"
+    shutdown
+    status=0
+    wait "${AGENT_PID}" || status="$?"
     exit "${status}"
   fi
 

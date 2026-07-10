@@ -94,7 +94,7 @@ PUBLIC_SS_PORT=12345
 https://你的后台域名/guide
 ```
 
-管理后台里提供“用户”“使用说明”和“工具”入口。说明页会展示电脑和手机怎么填，也可以复制 Clash 配置；公开说明页和 `/api/public-client-config` 不会返回 `SS_PASSWORD` 明文。
+管理后台里提供“用户”“节点”“使用说明”和“工具”入口。说明页会展示电脑和手机怎么填，也可以复制 Clash 配置；公开说明页和 `/api/public-client-config` 不会返回 `SS_PASSWORD` 明文。
 
 ### 多用户订阅
 
@@ -105,9 +105,48 @@ https://你的后台域名/sub/<token>/clash.yaml
 https://你的后台域名/sub/<token>/ss.txt
 ```
 
-订阅 token 只保存哈希，完整地址只会在创建用户或重置订阅时显示一次。订阅地址本身会返回带真实 `SS_PASSWORD` 的可用配置，谁拿到地址谁就能使用节点，请像密码一样保管。
+订阅 token 只保存哈希，完整地址只会在创建用户或重置订阅时显示一次。订阅地址本身会返回可用配置，谁拿到地址谁就能使用节点，请像密码一样保管。
 
-第一版仍然是共享一个 Railway TCP Proxy 和一个 Shadowsocks 端口。后台可以记录每个用户的订阅拉取记录，也可以停用用户让订阅接口不再返回配置；但已经导入过配置的客户端可能继续使用共享密码连接。当前 shadowsocks-rust 管理接口返回的是按端口统计的流量，不能可靠区分共享端口下每个用户的真实代理流量。未来要精确按用户统计和超额断开，需要迁移到“每用户独立端口/密码”的模式。
+如果没有配置“节点”，系统仍兼容原来的共享 `SS_PASSWORD` / `PUBLIC_SS_HOST` / `PUBLIC_SS_PORT` 模式。共享模式只能记录订阅拉取和端口总流量，不能可靠区分每个用户的真实代理流量。
+
+配置“节点”后，用户订阅会优先输出被授权节点。多节点模式会为“每个用户 + 每个节点”分配独立端口和独立密码：多个用户可以使用同一台节点机器，但各自走不同端口。节点 agent 会把端口计数上报给 admin，admin 可以按用户统计流量、手动停用用户，也会在用户达到配额后把状态改为“超额停用”；下一次 agent 同步时，对应端口会从节点上移除。
+
+### 多节点部署
+
+多节点由两部分组成：
+
+```text
+admin 后台
+  保存用户、节点、授权、配额和流量
+
+node-agent
+  部署在每台 Shadowsocks 节点机器上
+  连接本机 ssmanager
+  向 admin 上报状态和用量
+  按 admin 返回的授权列表 add/remove 端口
+```
+
+使用流程：
+
+1. 在 admin 后台打开“节点”页面。
+2. 创建节点，填写节点公网地址和端口池，例如 `20000-20100`。
+3. 保存创建后显示的 `NODE_ID` 和 `NODE_TOKEN`，令牌只显示一次。
+4. 在节点机器上运行同一个镜像，并设置：
+
+```text
+APP_ROLE=node-agent
+ADMIN_BASE_URL=https://你的后台域名
+NODE_ID=<后台创建节点后显示>
+NODE_TOKEN=<后台创建节点后显示>
+SS_MANAGER_PORT=6100
+SS_BIND_ADDRESS=::
+```
+
+5. 确保节点机器的公网入口能访问端口池里的端口。普通 VPS 可以开放这段 TCP 端口；Railway 这类平台通常需要为每个公开端口创建对应 TCP Proxy。
+6. 回到 admin 的用户详情页，在“可用节点”里勾选这个用户可以使用的节点。
+7. 用户拉取订阅后，Clash/SS 配置会包含这些节点。
+
+默认 Docker 入口仍然是原来的 `APP_ROLE=all`，会在一个容器内同时启动 admin、ssmanager 和单个共享节点。`APP_ROLE=node-agent` 只启动 ssmanager 和 agent，不启动管理后台。
 
 后台“工具”板块提供独立的“配置合并”页面。你可以把机场客户端当前使用的 Clash YAML 配置上传或粘贴进去，后台会把 Railway 节点追加为 `railway-fixed-ip`，并追加一个 `FixedIP` 代理组，最后输出一份合并后的 Clash 配置。可选填写要走 Railway 固定 IP 的域名，生成器会把这些规则插到 `MATCH` 规则之前。
 
@@ -124,10 +163,16 @@ GET /api/me
 GET /api/status
 GET /api/traffic?range=1h|24h|7d
 GET /api/events
+GET /api/nodes
+POST /api/nodes
+GET /api/nodes/:id
+PATCH /api/nodes/:id
+POST /api/nodes/:id/token/reset
 GET /api/users
 POST /api/users
 GET /api/users/:id
 PATCH /api/users/:id
+PUT /api/users/:id/nodes
 POST /api/users/:id/token/reset
 POST /api/merge-client-config
 ```
@@ -137,12 +182,13 @@ POST /api/merge-client-config
 ```text
 GET /guide
 GET /api/public-client-config
+POST /api/node-agent/sync
 GET /sub/:token/clash.yaml
 GET /sub/:token/ss.txt
 GET /healthz
 ```
 
-`/healthz` 用于 Railway 健康检查。`/api/client-config` 仍保留为登录后的兼容接口。
+`POST /api/node-agent/sync` 需要 `Authorization: Bearer <NODE_TOKEN>`，由节点 agent 调用。`/healthz` 用于 Railway 健康检查。`/api/client-config` 仍保留为登录后的兼容接口。
 
 ## 电脑怎么使用
 
@@ -266,10 +312,10 @@ npm test
 
 - `SS_PASSWORD` 使用长随机密码。
 - `ADMIN_PASSWORD` 使用另一段长随机密码，不要和 `SS_PASSWORD` 相同。
-- 不要公开 TCP Proxy 地址、端口和密码。
+- 不要公开 TCP Proxy 地址、端口、订阅地址、节点端口密码或 `NODE_TOKEN`。
 - 不要公开 `SS_MANAGER_PORT`。
 - 不要部署没有认证的 HTTP 或 SOCKS 代理。
-- 如果节点信息泄露，立刻更换 `SS_PASSWORD` 并重新部署。
+- 如果共享节点信息泄露，立刻更换 `SS_PASSWORD` 并重新部署；如果多节点令牌泄露，在后台重置节点令牌并更新节点环境变量。
 
 ## Railway 限制
 

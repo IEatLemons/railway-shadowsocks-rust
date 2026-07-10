@@ -19,6 +19,15 @@ export type SubscriptionUser = {
   name: string;
 };
 
+export type UserSubscriptionNode = {
+  method: string;
+  nodeId: string;
+  nodeName: string;
+  password: string;
+  publicHost: string;
+  publicPort: number;
+};
+
 type TopLevelSection = {
   key: string | null;
   lines: string[];
@@ -42,6 +51,12 @@ function subscriptionNodeName(user: SubscriptionUser): string {
   return `railway-user-${normalized}`;
 }
 
+function subscriptionMultiNodeName(user: SubscriptionUser, node: UserSubscriptionNode): string {
+  const userPart = user.name.trim().replace(/\s+/g, "-") || user.id.slice(0, 8);
+  const nodePart = node.nodeName.trim().replace(/\s+/g, "-") || node.nodeId.slice(0, 8);
+  return `railway-${nodePart}-${userPart}-${node.publicPort}`;
+}
+
 function formatServerHost(host: string): string {
   if (host.includes(":") && !host.startsWith("[") && !host.endsWith("]")) return `[${host}]`;
   return host;
@@ -63,6 +78,20 @@ function buildRailwayProxyBlock(
     `    port: ${/^\d+$/.test(port) ? port : yamlScalar(port)}`,
     `    cipher: ${yamlScalar(config.ssMethod)}`,
     `    password: ${yamlScalar(password)}`,
+    "    udp: false"
+  ];
+}
+
+function buildSubscriptionNodeProxyBlock(user: SubscriptionUser, node: UserSubscriptionNode): string[] {
+  const nodeName = subscriptionMultiNodeName(user, node);
+
+  return [
+    `  - name: ${yamlScalar(nodeName)}`,
+    "    type: ss",
+    `    server: ${yamlScalar(node.publicHost)}`,
+    `    port: ${node.publicPort}`,
+    `    cipher: ${yamlScalar(node.method)}`,
+    `    password: ${yamlScalar(node.password)}`,
     "    udp: false"
   ];
 }
@@ -107,7 +136,26 @@ export function buildClientConfig(config: AppConfig): ClientConfigPayload {
   };
 }
 
-export function buildUserClashYaml(config: AppConfig, user: SubscriptionUser): string {
+export function buildUserClashYaml(config: AppConfig, user: SubscriptionUser, nodes: UserSubscriptionNode[] = []): string {
+  if (nodes.length > 0) {
+    const nodeNames = nodes.map((node) => subscriptionMultiNodeName(user, node));
+    return [
+      "proxies:",
+      ...nodes.flatMap((node) => buildSubscriptionNodeProxyBlock(user, node)),
+      "",
+      "proxy-groups:",
+      "  - name: Proxy",
+      "    type: select",
+      "    proxies:",
+      ...nodeNames.map((name) => `      - ${yamlScalar(name)}`),
+      "      - DIRECT",
+      "",
+      "rules:",
+      "  - MATCH,Proxy",
+      ""
+    ].join("\n");
+  }
+
   const nodeName = subscriptionNodeName(user);
 
   return [
@@ -130,16 +178,21 @@ export function buildUserClashYaml(config: AppConfig, user: SubscriptionUser): s
   ].join("\n");
 }
 
-export function buildUserSsUri(config: AppConfig, user: SubscriptionUser): string {
-  const userInfo = base64Url(`${config.ssMethod}:${config.ssPassword}`);
-  const host = formatServerHost(config.publicSsHost || "YOUR_RAILWAY_TCP_PROXY_HOST");
-  const port = config.publicSsPort || "YOUR_RAILWAY_TCP_PROXY_PORT";
-  const fragment = encodeURIComponent(subscriptionNodeName(user));
+export function buildUserSsUri(config: AppConfig, user: SubscriptionUser, node?: UserSubscriptionNode): string {
+  const method = node?.method || config.ssMethod;
+  const password = node?.password || config.ssPassword;
+  const host = formatServerHost(node?.publicHost || config.publicSsHost || "YOUR_RAILWAY_TCP_PROXY_HOST");
+  const port = node?.publicPort || config.publicSsPort || "YOUR_RAILWAY_TCP_PROXY_PORT";
+  const fragment = encodeURIComponent(node ? subscriptionMultiNodeName(user, node) : subscriptionNodeName(user));
+  const userInfo = base64Url(`${method}:${password}`);
   return `ss://${userInfo}@${host}:${port}#${fragment}`;
 }
 
-export function buildUserSsSubscription(config: AppConfig, user: SubscriptionUser): string {
-  return Buffer.from(`${buildUserSsUri(config, user)}\n`, "utf8").toString("base64");
+export function buildUserSsSubscription(config: AppConfig, user: SubscriptionUser, nodes: UserSubscriptionNode[] = []): string {
+  const uris = nodes.length > 0
+    ? nodes.map((node) => buildUserSsUri(config, user, node))
+    : [buildUserSsUri(config, user)];
+  return Buffer.from(`${uris.join("\n")}\n`, "utf8").toString("base64");
 }
 
 function topLevelKey(line: string): string | null {

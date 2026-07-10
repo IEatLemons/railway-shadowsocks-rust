@@ -368,11 +368,66 @@ code {
 .user-form {
   display: grid;
   gap: 12px;
-  grid-template-columns: minmax(180px, 1fr) minmax(220px, 1.4fr) minmax(120px, 0.6fr) minmax(120px, 0.6fr) auto;
+  grid-template-columns: minmax(180px, 1fr) minmax(220px, 1.2fr) minmax(120px, 0.5fr) minmax(120px, 0.5fr) minmax(240px, 1.3fr) auto;
 }
 
 .user-form .field {
   margin-bottom: 0;
+}
+
+.node-form {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(160px, 0.9fr) minmax(220px, 1.4fr) minmax(120px, 0.5fr) minmax(120px, 0.5fr) minmax(160px, 0.8fr) auto;
+}
+
+.node-form .field,
+.node-assignment-form .field {
+  margin-bottom: 0;
+}
+
+.node-field {
+  min-width: 0;
+}
+
+.node-checks {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.check-card {
+  align-items: flex-start;
+  background: var(--panel-soft);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: auto minmax(0, 1fr);
+  min-height: 52px;
+  padding: 9px 10px;
+}
+
+.check-card input {
+  margin-top: 3px;
+}
+
+.check-card strong,
+.check-card small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.check-card small {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.node-assignment-form {
+  display: grid;
+  gap: 12px;
 }
 
 .form-actions {
@@ -653,6 +708,7 @@ a.button-link:hover {
   .merge-editors,
   .merge-grid,
   .metrics,
+  .node-form,
   .tools-list,
   .user-form,
   .layout {
