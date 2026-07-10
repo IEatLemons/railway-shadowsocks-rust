@@ -38,6 +38,7 @@ test("manages users, subscription tokens, and access logs", () => {
   const found = store.findSubscriptionByTokenHash(hashSubscriptionToken(created.token));
   assert.equal(found?.user.id, created.user.id);
   assert.equal(found?.tokenRecord.revoked, false);
+  assert.equal(store.getActiveSubscriptionTokenValue(created.user.id), created.token);
 
   store.recordSubscriptionAccess(created.user.id, created.tokenRecord.id, {
     format: "clash",
@@ -51,6 +52,7 @@ test("manages users, subscription tokens, and access logs", () => {
 
   const reset = store.resetSubscriptionToken(created.user.id);
   assert.ok(reset);
+  assert.equal(store.getActiveSubscriptionTokenValue(created.user.id), reset.token);
   const oldToken = store.findSubscriptionByTokenHash(hashSubscriptionToken(created.token));
   assert.equal(oldToken?.tokenRecord.revoked, true);
 

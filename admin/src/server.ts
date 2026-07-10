@@ -363,8 +363,11 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
         const range = url.searchParams.get("range") || "24h";
         const detail = await store.getUserDetail(userId);
         if (!detail) return json(res, 404, { error: "not_found" });
+        const activeToken = await store.getActiveSubscriptionTokenValue(userId);
         return json(res, 200, {
           ...detail,
+          subscription: activeToken ? subscriptionUrls(req, config, activeToken) : null,
+          subscriptionUnavailableReason: detail.activeToken && !activeToken ? "active_token_not_recoverable" : null,
           sharedTraffic: await store.getTraffic(range),
           trafficMode: userTrafficMode(),
           userTraffic: await store.getTrafficByUser(userId, range)

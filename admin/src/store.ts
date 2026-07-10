@@ -112,6 +112,7 @@ export type Store = {
   getRecordedTotalBytes(): MaybePromise<number>;
   getTraffic(range: string): MaybePromise<TrafficSummary>;
   getTrafficByUser(userId: string, range: string): MaybePromise<TrafficSummary>;
+  getActiveSubscriptionTokenValue(userId: string): MaybePromise<string | null>;
   getUserDetail(userId: string, limit?: number): MaybePromise<UserDetail | null>;
   listUsers(): MaybePromise<UserListItem[]>;
   recordEvent(level: EventLevel, message: string, detail?: unknown): MaybePromise<void>;
@@ -382,6 +383,7 @@ function initSqlite(db: DatabaseSync): void {
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
       token_hash TEXT NOT NULL UNIQUE,
+      token_value TEXT,
       revoked INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL,
       last_accessed_at INTEGER,
@@ -401,6 +403,11 @@ function initSqlite(db: DatabaseSync): void {
     );
     CREATE INDEX IF NOT EXISTS subscription_access_logs_user_ts_idx ON subscription_access_logs (user_id, ts);
   `);
+
+  const tokenColumns = db.prepare("PRAGMA table_info(subscription_tokens)").all() as Array<{ name: string }>;
+  if (!tokenColumns.some((column) => column.name === "token_value")) {
+    db.exec("ALTER TABLE subscription_tokens ADD COLUMN token_value TEXT");
+  }
 
   const legacySamples = db
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'samples'")
@@ -458,12 +465,13 @@ export function openStore(preferredDataDir: string): Store {
           user.disabledAt
         );
         db.prepare(`
-          INSERT INTO subscription_tokens (id, user_id, token_hash, revoked, created_at, last_accessed_at, revoked_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO subscription_tokens (id, user_id, token_hash, token_value, revoked, created_at, last_accessed_at, revoked_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           tokenRecord.id,
           tokenRecord.userId,
           tokenRecord.tokenHash,
+          token,
           0,
           tokenRecord.createdAt,
           tokenRecord.lastAccessedAt,
@@ -568,6 +576,12 @@ export function openStore(preferredDataDir: string): Store {
 
       return trafficSummaryFromRows(normalizeSampleRows(rows), normalizedRange, until);
     },
+    getActiveSubscriptionTokenValue(userId: string): string | null {
+      const row = db
+        .prepare("SELECT token_value FROM subscription_tokens WHERE user_id = ? AND revoked = 0 ORDER BY created_at DESC LIMIT 1")
+        .get(userId) as { token_value: string | null } | undefined;
+      return row?.token_value ? String(row.token_value) : null;
+    },
     getUserDetail(userId: string, limit = 50): UserDetail | null {
       const user = getUser(userId);
       if (!user) return null;
@@ -656,12 +670,13 @@ export function openStore(preferredDataDir: string): Store {
         db.prepare("UPDATE subscription_tokens SET revoked = 1, revoked_at = ? WHERE user_id = ? AND revoked = 0")
           .run(now, userId);
         db.prepare(`
-          INSERT INTO subscription_tokens (id, user_id, token_hash, revoked, created_at, last_accessed_at, revoked_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO subscription_tokens (id, user_id, token_hash, token_value, revoked, created_at, last_accessed_at, revoked_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           tokenRecord.id,
           tokenRecord.userId,
           tokenRecord.tokenHash,
+          token,
           0,
           tokenRecord.createdAt,
           tokenRecord.lastAccessedAt,
@@ -753,6 +768,7 @@ async function initPostgres(pool: { query: (sql: string, values?: unknown[]) => 
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       token_hash TEXT NOT NULL UNIQUE,
+      token_value TEXT,
       revoked INTEGER NOT NULL DEFAULT 0,
       created_at BIGINT NOT NULL,
       last_accessed_at BIGINT,
@@ -770,6 +786,7 @@ async function initPostgres(pool: { query: (sql: string, values?: unknown[]) => 
     );
     CREATE INDEX IF NOT EXISTS subscription_access_logs_user_ts_idx ON subscription_access_logs (user_id, ts);
   `);
+  await pool.query("ALTER TABLE subscription_tokens ADD COLUMN IF NOT EXISTS token_value TEXT");
 }
 
 async function prunePostgres(pool: { query: (sql: string, values?: unknown[]) => Promise<unknown> }, now = Date.now()): Promise<void> {
@@ -829,12 +846,13 @@ export async function openPostgresStore(databaseUrl: string): Promise<Store> {
           user.disabledAt
         ]);
         await client.query(`
-          INSERT INTO subscription_tokens (id, user_id, token_hash, revoked, created_at, last_accessed_at, revoked_at)
-          VALUES ($1, $2, $3, $4, $5, $6, $7)
+          INSERT INTO subscription_tokens (id, user_id, token_hash, token_value, revoked, created_at, last_accessed_at, revoked_at)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         `, [
           tokenRecord.id,
           tokenRecord.userId,
           tokenRecord.tokenHash,
+          token,
           0,
           tokenRecord.createdAt,
           tokenRecord.lastAccessedAt,
@@ -940,6 +958,14 @@ export async function openPostgresStore(databaseUrl: string): Promise<Store> {
       );
       return trafficSummaryFromRows(normalizeSampleRows(result.rows), normalizedRange, until);
     },
+    async getActiveSubscriptionTokenValue(userId: string): Promise<string | null> {
+      const result = await pool.query(
+        "SELECT token_value FROM subscription_tokens WHERE user_id = $1 AND revoked = 0 ORDER BY created_at DESC LIMIT 1",
+        [userId]
+      );
+      const value = result.rows[0]?.token_value;
+      return value ? String(value) : null;
+    },
     async getUserDetail(userId: string, limit = 50): Promise<UserDetail | null> {
       const user = await getUser(userId);
       if (!user) return null;
@@ -1033,12 +1059,13 @@ export async function openPostgresStore(databaseUrl: string): Promise<Store> {
           [now, userId]
         );
         await client.query(`
-          INSERT INTO subscription_tokens (id, user_id, token_hash, revoked, created_at, last_accessed_at, revoked_at)
-          VALUES ($1, $2, $3, $4, $5, $6, $7)
+          INSERT INTO subscription_tokens (id, user_id, token_hash, token_value, revoked, created_at, last_accessed_at, revoked_at)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         `, [
           tokenRecord.id,
           tokenRecord.userId,
           tokenRecord.tokenHash,
+          token,
           0,
           tokenRecord.createdAt,
           tokenRecord.lastAccessedAt,

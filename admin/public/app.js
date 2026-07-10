@@ -461,6 +461,49 @@ function renderSubscriptionNotice() {
   `;
 }
 
+function renderUserSubscriptionPanel(detail) {
+  const subscription = detail?.subscription;
+
+  if (!subscription) {
+    const message = detail?.subscriptionUnavailableReason === "active_token_not_recoverable"
+      ? "这个订阅地址由旧版本创建，后台没有保存完整 token。重置订阅后即可再次复制。"
+      : "当前没有可复制的订阅地址。";
+
+    return `
+      <section class="panel">
+        <div class="panel-header">
+          <h2>订阅地址</h2>
+        </div>
+        <div class="warning">${escapeHtml(message)}</div>
+      </section>
+    `;
+  }
+
+  return `
+    <section class="panel">
+      <div class="panel-header">
+        <h2>订阅地址</h2>
+      </div>
+      <div class="subscription-links">
+        <div class="field">
+          <label>Clash</label>
+          <div class="copy-row">
+            <code>${escapeHtml(subscription.clashUrl || "")}</code>
+            <button data-copy-current-sub="clash">复制</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>Shadowsocks</label>
+          <div class="copy-row">
+            <code>${escapeHtml(subscription.ssUrl || "")}</code>
+            <button data-copy-current-sub="ss">复制</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function renderSharedTrafficWarning(trafficMode) {
   return `
     <div class="warning">
@@ -571,7 +614,6 @@ function renderUserDetail() {
 
       ${renderSharedTrafficWarning(detail.trafficMode)}
       ${state.userError ? `<div class="warning">${escapeHtml(state.userError)}</div>` : ""}
-      ${renderSubscriptionNotice()}
 
       <section class="metrics">
         ${metricCard("状态", `<span class="status-pill"><span class="dot ${userStatusClass(user.status)}"></span>${escapeHtml(formatUserStatus(user.status))}</span>`, user.status === "active" ? "订阅可正常拉取" : "订阅接口会返回不可用")}
@@ -595,6 +637,8 @@ function renderUserDetail() {
           <div><dt>更新时间</dt><dd>${escapeHtml(formatTime(user.updatedAt))}</dd></div>
         </dl>
       </section>
+
+      ${renderUserSubscriptionPanel(detail)}
 
       <section class="panel">
         <div class="panel-header">
@@ -875,6 +919,19 @@ function bindSubscriptionNoticeEvents() {
   }
 }
 
+function bindCurrentSubscriptionEvents() {
+  const subscription = state.userDetail?.subscription;
+  if (!subscription) return;
+
+  for (const button of document.querySelectorAll("[data-copy-current-sub]")) {
+    button.addEventListener("click", async (event) => {
+      const format = event.currentTarget.dataset.copyCurrentSub;
+      const text = format === "ss" ? subscription.ssUrl : subscription.clashUrl;
+      await copyFromButton(event.currentTarget, text || "", "已复制");
+    });
+  }
+}
+
 function saveMergeFormState() {
   const input = document.querySelector("#merge-input");
   const domains = document.querySelector("#merge-domains");
@@ -981,7 +1038,7 @@ function bindUsersEvents() {
 }
 
 function bindUserDetailEvents() {
-  bindSubscriptionNoticeEvents();
+  bindCurrentSubscriptionEvents();
 
   const detail = state.userDetail;
   const user = detail?.user;
@@ -1012,10 +1069,10 @@ function bindUserDetailEvents() {
     reset.addEventListener("click", async () => {
       state.userError = "";
       try {
-        const result = await api(`/api/users/${encodeURIComponent(user.id)}/token/reset`, {
+        await api(`/api/users/${encodeURIComponent(user.id)}/token/reset`, {
           method: "POST"
         });
-        state.userSubscription = result.subscription;
+        state.userSubscription = null;
         await loadUserDetail(user.id);
         renderCurrentRoute();
       } catch (error) {
@@ -1070,6 +1127,7 @@ async function loadUsers() {
 }
 
 async function loadUserDetail(userId) {
+  state.userSubscription = null;
   state.userDetail = await api(`/api/users/${encodeURIComponent(userId)}?range=${encodeURIComponent(state.range)}`);
 }
 

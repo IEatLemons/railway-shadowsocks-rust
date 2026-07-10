@@ -139,6 +139,8 @@ test("creates per-user subscription URLs and gates disabled users", async () => 
     assert.equal(detailResponse.status, 200);
     const detail = await detailResponse.json();
     assert.equal(detail.accessLogs.length, 2);
+    assert.equal(detail.subscription.clashUrl, created.subscription.clashUrl);
+    assert.equal(detail.subscription.ssUrl, created.subscription.ssUrl);
     assert.equal(detail.trafficMode.perUserReliable, false);
 
     const disableResponse = await fetch(`${baseUrl}/api/users/${encodeURIComponent(created.user.id)}`, {
