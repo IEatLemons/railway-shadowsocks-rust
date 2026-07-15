@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { clearSessionCookie, createSessionManager, getSessionToken, safeEqualString, setSessionCookie } from "./auth.ts";
 import { buildClientConfig, buildUserClashYaml, buildUserSsSubscription, mergeClashConfig } from "./clientConfig.ts";
 import { getConfigWarnings, readConfig, type AppConfig } from "./config.ts";
-import { listServers, pingManager, type NormalizedServer } from "./managerClient.ts";
+import { includeCurrentServer, listServers, pingManager, type NormalizedServer } from "./managerClient.ts";
 import { hashSubscriptionToken, openConfiguredStore, type CreatedSubscription, type Store, type UserStatus } from "./store.ts";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -194,6 +194,14 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
     } catch (error) {
       lastError = lastError || (error instanceof Error ? error.message : String(error));
     }
+
+    // A server loaded from ssmanager's startup config is not returned by `list`
+    // in every shadowsocks-rust version. Keep the configured primary server in
+    // the snapshot so an empty dynamic list does not make a running node vanish.
+    servers = includeCurrentServer(servers, {
+      method: config.ssMethod,
+      port: config.ssPort
+    });
 
     if (lastError && shouldLogError(lastManagerError, lastError)) {
       lastManagerError = { message: lastError, ts: Date.now() };

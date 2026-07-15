@@ -20,10 +20,45 @@ export type NormalizedStat = {
 };
 
 export type NormalizedServer = {
+  current?: boolean;
   method?: string;
   port: string;
   raw: unknown;
 };
+
+export function includeCurrentServer(
+  servers: NormalizedServer[],
+  current: { method: string; port: number | string }
+): NormalizedServer[] {
+  const currentPort = String(current.port);
+  let found = false;
+
+  const merged = servers.map((server) => {
+    if (server.port !== currentPort) return server;
+    found = true;
+    return {
+      ...server,
+      current: true,
+      method: server.method || current.method
+    };
+  });
+
+  if (found) return merged;
+
+  return [
+    {
+      current: true,
+      method: current.method,
+      port: currentPort,
+      raw: {
+        method: current.method,
+        server_port: current.port,
+        source: "configured"
+      }
+    },
+    ...merged
+  ];
+}
 
 function parseJsonLike(value: string): unknown {
   const trimmed = value.trim();

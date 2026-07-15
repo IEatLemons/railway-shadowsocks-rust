@@ -181,6 +181,19 @@ button:disabled {
   gap: 8px;
 }
 
+.tag {
+  background: #e8f5ee;
+  border-radius: 999px;
+  color: #16794a;
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  margin-left: 6px;
+  padding: 2px 7px;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
 .dot {
   border-radius: 50%;
   display: inline-block;

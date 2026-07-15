@@ -772,6 +772,11 @@ function renderDashboard() {
             `<span class="status-pill"><span class="dot ${online ? "online" : "offline"}"></span>${online ? "在线" : "离线"}</span>`,
             status?.manager?.lastError || `管理接口 ${status?.manager?.host || ""}:${status?.manager?.port || ""}`
           )}
+          ${metricCard(
+            "多节点",
+            `${online ? servers.length : 0} / ${servers.length}`,
+            "在线节点 / 已配置节点"
+          )}
           ${metricCard("当前计数器", escapeHtml(formatBytes(status?.traffic?.currentTotalBytes)), "最近一次 ssmanager 返回的总量")}
           ${metricCard("已记录流量", escapeHtml(formatBytes(status?.traffic?.recordedTotalBytes)), `当前范围：${formatBytes(traffic?.totalBytes)}`)}
           ${metricCard("后台运行时间", escapeHtml(formatDuration(status?.admin?.uptimeSeconds)), `启动于 ${formatTime(status?.admin?.startedAt)}`)}
@@ -812,7 +817,7 @@ function renderDashboard() {
                   ? `<tr><td colspan="3" class="subtle">还没有返回服务端口列表</td></tr>`
                   : servers.map((server) => `
                     <tr>
-                      <td>${escapeHtml(server.port)}</td>
+                      <td>${escapeHtml(server.port)}${server.current ? ` <span class="tag">当前节点</span>` : ""}</td>
                       <td>${escapeHtml(server.method || status?.shadowsocks?.method || "")}</td>
                       <td><code>${escapeHtml(JSON.stringify(server.raw))}</code></td>
                     </tr>

@@ -4,7 +4,28 @@
 
 它不是完整 VPN，而是一个 TCP Shadowsocks 代理节点。通常用于让浏览器或应用的指定域名流量通过 Railway 出口访问目标网站；如果开启 Railway Static Outbound IPs，目标网站看到的会是 Railway 的出口 IP。
 
-## 工作方式
+## 当前架构
+
+镜像支持三种运行角色，由 `SERVICE_ROLE` 决定：
+
+```text
+all（默认，兼容原部署）
+  ├─ ssmanager / Shadowsocks 节点
+  └─ Node.js 管理后台
+
+node
+  ├─ ssmanager / Shadowsocks 节点
+  └─ 仅用于 Railway 健康检查的 /healthz
+
+admin
+  └─ Node.js 管理后台（调度台）
+       ├─ PostgreSQL 或 SQLite
+       └─ 通过 Railway 私有网络的 UDP 6100 读取 node 状态
+```
+
+当前“调度”只包含节点状态、总流量、用户和订阅管理；节点配置仍由环境变量和部署驱动，后台还不能动态新增、删除或改配多个节点。多节点的下一阶段应在节点端增加带认证的控制 API，调度台再维护节点注册表，而不是把未认证的 `ssmanager` 管理端口暴露到公网。
+
+## 请求链路
 
 ```text
 浏览器 / App
@@ -16,7 +37,63 @@
 管理后台浏览器
   -> Railway HTTP 域名，端口 3000
   -> 内置中文管理后台
-  -> 容器内 ssmanager UDP 管理接口
+  -> 同容器或 Railway 私有网络内的 ssmanager UDP 管理接口
+```
+
+## 按角色部署
+
+仓库提供 `scripts/deploy.sh`，用于把同一份镜像部署成节点端、调度台端或兼容的一体化服务。脚本要求本机已安装 Railway CLI，并已执行登录和项目链接。
+
+先在同一个 Railway Project 和 Environment 中创建两个服务，例如 `ss-node` 和 `ss-admin`，然后运行：
+
+```bash
+./scripts/deploy.sh node --service ss-node --environment production
+./scripts/deploy.sh admin --service ss-admin --environment production
+```
+
+只查看将执行的命令：
+
+```bash
+./scripts/deploy.sh node --service ss-node --dry-run
+```
+
+两个服务的关键变量如下。
+
+节点端 `ss-node`：
+
+```text
+SERVICE_ROLE=node                  # 部署脚本自动设置
+SS_PASSWORD=<共享节点密码>
+SS_METHOD=aes-256-gcm
+SS_PORT=8388
+SS_MANAGER_PORT=6100
+SS_MANAGER_BIND_ADDRESS=::
+PORT=3000                          # 只用于 /healthz
+```
+
+调度台端 `ss-admin`：
+
+```text
+SERVICE_ROLE=admin                 # 部署脚本自动设置
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=<管理后台密码>
+SS_PASSWORD=<与节点端相同的密码>
+SS_METHOD=aes-256-gcm
+SS_PORT=8388
+SS_MANAGER_HOST=ss-node.railway.internal
+SS_MANAGER_PORT=6100
+PUBLIC_SS_HOST=<节点 TCP Proxy 地址>
+PUBLIC_SS_PORT=<节点 TCP Proxy 外部端口>
+DATABASE_URL=<推荐使用 Railway PostgreSQL 私有连接串>
+PORT=3000
+```
+
+为 `ss-node` 的内部端口 `8388` 创建公开 TCP Proxy；只给 `ss-admin` 创建 HTTP 域名。不要公开 `6100`，调度台通过同一 Project/Environment 内的 `ss-node.railway.internal:6100/udp` 访问它。如果节点服务使用了其他名称，请同步修改 `SS_MANAGER_HOST`。
+
+继续使用原来的一体化服务时不需要改变量；`SERVICE_ROLE` 未设置时默认为 `all`：
+
+```bash
+./scripts/deploy.sh all --service shadowsocks
 ```
 
 ## Railway 部署
