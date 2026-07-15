@@ -172,7 +172,41 @@ function userTrafficMode(hasNodes = false) {
   return {
     mode: "shared_port",
     perUserReliable: false,
-    message: "当前还没有配置多节点，未授权节点的用户会回退到共享端口模式，不能可靠区分每个用户的代理流量。"
+    message: "当前用户使用内置节点的共享端口。后台会展示该节点的总流量，但同一端口无法可靠区分到单个用户；配置独立端口的扩展节点后可查看精确个人流量。"
+  };
+}
+
+function currentNodeView(config: AppConfig, snapshot: ManagerSnapshot | null, assignedUserCount = 0) {
+  const publicPort = String(config.publicSsPort || "");
+  const numericPublicPort = Number(publicPort);
+  const now = Date.now();
+
+  return {
+    assignable: false,
+    assignedUserCount,
+    createdAt: startedAt.getTime(),
+    current: true,
+    id: "current",
+    lastError: snapshot?.lastError || null,
+    lastHeartbeatAt: snapshot?.online ? now : null,
+    load: snapshot
+      ? {
+        activeServers: snapshot.servers.length,
+        managerOnline: snapshot.online
+      }
+      : null,
+    name: "当前节点",
+    online: snapshot?.online ?? null,
+    publicHost: config.publicSsHost,
+    publicPort,
+    publicPortEnd: publicPort && Number.isInteger(numericPublicPort) ? numericPublicPort : null,
+    publicPortStart: publicPort && Number.isInteger(numericPublicPort) ? numericPublicPort : null,
+    serverPort: config.ssPort,
+    ssMethod: config.ssMethod,
+    ssMode: "tcp_only",
+    ssTimeout: config.ssTimeout,
+    status: "active",
+    updatedAt: now
   };
 }
 
@@ -365,7 +399,15 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
 
     if (url.pathname === "/api/nodes") {
       if (req.method === "GET") {
-        return json(res, 200, { nodes: await store.listNodes() });
+        const [nodes, users, snapshot] = await Promise.all([
+          store.listNodes(),
+          store.listUsers(),
+          readManagerSnapshot()
+        ]);
+        return json(res, 200, {
+          currentNode: currentNodeView(config, snapshot, users.length),
+          nodes
+        });
       }
 
       if (req.method === "POST") {
@@ -419,16 +461,34 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
 
     if (url.pathname === "/api/users") {
       if (req.method === "GET") {
+        const range = url.searchParams.get("range") || "24h";
         const users = await store.listUsers();
         const nodes = await store.listNodes();
+        const [sharedTraffic, usersWithTraffic] = await Promise.all([
+          store.getTraffic(range),
+          Promise.all(users.map(async (user) => {
+            const [traffic, assignments] = await Promise.all([
+              store.getTrafficByUser(user.id, range),
+              store.getUserNodeAssignments(user.id)
+            ]);
+            return {
+              ...user,
+              trafficBytes: traffic.totalBytes,
+              trafficReliable: assignments.some((assignment) => assignment.enabled)
+            };
+          }))
+        ]);
         return json(res, 200, {
+          currentNode: currentNodeView(config, null, users.length),
           nodes,
+          range,
+          sharedTraffic,
           storage: {
             backend: store.backend,
             dataDir: store.dataDir
           },
           trafficMode: userTrafficMode(nodes.length > 0),
-          users
+          users: usersWithTraffic
         });
       }
 
@@ -459,9 +519,10 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
       if (!created) return json(res, 404, { error: "not_found" });
 
       await store.recordEvent("info", "用户订阅地址已重置", { userId: created.user.id, name: created.user.name });
+      const nodes = await store.listNodes();
       return json(res, 200, {
         subscription: subscriptionPayload(req, config, created),
-        trafficMode: userTrafficMode(),
+        trafficMode: userTrafficMode(nodes.length > 0),
         user: created.user
       });
     }
@@ -497,8 +558,10 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
         if (!detail) return json(res, 404, { error: "not_found" });
         const activeToken = await store.getActiveSubscriptionTokenValue(userId);
         const nodes = await store.listNodes();
+        const users = await store.listUsers();
         return json(res, 200, {
           ...detail,
+          currentNode: currentNodeView(config, null, users.length),
           subscription: activeToken ? subscriptionUrls(req, config, activeToken) : null,
           subscriptionUnavailableReason: detail.activeToken && !activeToken ? "active_token_not_recoverable" : null,
           nodeAssignments: await store.getUserNodeAssignments(userId),
@@ -546,7 +609,7 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
       if (req.method !== "GET") return methodNotAllowed(res);
       const snapshot = await readManagerSnapshot();
       const latestSamples = await store.getLatestSamples();
-      const nodes = await store.listNodes();
+      const [nodes, users] = await Promise.all([store.listNodes(), store.listUsers()]);
       return json(res, 200, {
         admin: {
           dataDir: store.dataDir,
@@ -555,6 +618,7 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
           uptimeSeconds: Math.round(process.uptime())
         },
         configWarnings: getConfigWarnings(config),
+        currentNode: currentNodeView(config, snapshot, users.length),
         manager: {
           host: config.managerHost,
           lastError: snapshot.lastError,

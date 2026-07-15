@@ -121,6 +121,20 @@ test("creates per-user subscription URLs and gates disabled users", async () => 
     assert.match(created.subscription.clashUrl, /\/sub\/.+\/clash\.yaml$/);
     assert.match(created.subscription.ssUrl, /\/sub\/.+\/ss\.txt$/);
 
+    const usersResponse = await fetch(`${baseUrl}/api/users?range=1h`, {
+      headers: { Cookie: cookie }
+    });
+    assert.equal(usersResponse.status, 200);
+    const usersPayload = await usersResponse.json();
+    assert.equal(usersPayload.currentNode.current, true);
+    assert.equal(usersPayload.currentNode.name, "当前节点");
+    assert.equal(usersPayload.currentNode.publicHost, "tcp.example.com");
+    assert.equal(usersPayload.currentNode.publicPort, "12345");
+    assert.equal(usersPayload.nodes.length, 0);
+    assert.equal(usersPayload.users[0].trafficBytes, 0);
+    assert.equal(usersPayload.users[0].trafficReliable, false);
+    assert.equal(usersPayload.sharedTraffic.range, "1h");
+
     const clashResponse = await fetch(created.subscription.clashUrl);
     assert.equal(clashResponse.status, 200);
     const clash = await clashResponse.text();

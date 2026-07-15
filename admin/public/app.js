@@ -143,16 +143,23 @@ function userStatusClass(status) {
 
 function nodeStatusClass(node) {
   if (node?.status !== "active") return "offline";
+  if (node.current) return node.online ? "online" : "offline";
   return node.online ? "online" : "warning";
 }
 
 function formatNodeStatus(node) {
   if (node?.status !== "active") return "停用";
+  if (node.current) return node.online ? "在线" : "离线";
   return node.online ? "在线" : "等待心跳";
 }
 
 function nodeEndpoint(node) {
   if (!node) return "";
+  if (node.current) {
+    const host = node.publicHost || "未配置公网地址";
+    const port = node.publicPort || node.serverPort || "";
+    return port ? `${host}:${port}` : host;
+  }
   return node.publicPortStart === node.publicPortEnd
     ? `${node.publicHost}:${node.publicPortStart}`
     : `${node.publicHost}:${node.publicPortStart}-${node.publicPortEnd}`;
@@ -199,8 +206,13 @@ function getRoute() {
 
 function getEndpointLabel() {
   const status = state.status;
-  return status?.shadowsocks?.publicHost && status?.shadowsocks?.publicPort
-    ? `${status.shadowsocks.publicHost}:${status.shadowsocks.publicPort}`
+  if (status?.shadowsocks?.publicHost && status?.shadowsocks?.publicPort) {
+    return `${status.shadowsocks.publicHost}:${status.shadowsocks.publicPort}`;
+  }
+
+  const currentNode = state.nodes?.currentNode || state.users?.currentNode || state.userDetail?.currentNode;
+  return currentNode?.publicHost && currentNode?.publicPort
+    ? `${currentNode.publicHost}:${currentNode.publicPort}`
     : "尚未配置客户端地址";
 }
 
@@ -312,6 +324,24 @@ function formatTrafficTick(value, unitIndex) {
   return `${scaled.toFixed(digits)} ${BYTE_UNITS[unitIndex]}`;
 }
 
+function formatChartAxisTime(value, range) {
+  const date = new Date(value);
+  if (range === "7d") {
+    return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(date);
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(date);
+}
+
+function formatBucketDuration(value) {
+  const minutes = Math.round(Number(value || 0) / 60000);
+  if (minutes < 60) return `${minutes} 分钟`;
+  return `${Math.round(minutes / 60)} 小时`;
+}
+
 function drawChart(summary) {
   const points = summary?.points || [];
   if (points.length === 0) {
@@ -321,12 +351,12 @@ function drawChart(summary) {
   const width = 720;
   const height = 260;
   const plot = {
-    bottom: 36,
+    bottom: 44,
     left: 82,
-    right: 28,
+    right: 22,
     top: 24
   };
-  const maxBytes = Math.max(...points.map((point) => point.bytes), 1);
+  const maxBytes = Math.max(...points.map((point) => point.cumulativeBytes ?? point.bytes), 1);
   const ticks = buildTrafficTicks(maxBytes);
   const axisMax = ticks[0] || maxBytes;
   const unitIndex = chartUnitIndex(axisMax);
@@ -338,17 +368,29 @@ function drawChart(summary) {
 
   const coordinates = points.map((point) => {
     const x = plot.left + ((point.timestamp - minTime) / xSpan) * plotWidth;
-    const y = plot.top + (1 - point.bytes / axisMax) * plotHeight;
+    const plottedBytes = point.cumulativeBytes ?? point.bytes;
+    const y = plot.top + (1 - plottedBytes / axisMax) * plotHeight;
     return {
       point,
+      plottedBytes,
       value: `${x.toFixed(1)},${y.toFixed(1)}`,
       x: x.toFixed(1),
       y: y.toFixed(1)
     };
   });
+  const baselineY = height - plot.bottom;
+  const lineValues = [`${plot.left},${baselineY}`, ...coordinates.map((coordinate) => coordinate.value)];
+  const areaPath = `M ${plot.left} ${baselineY} L ${coordinates.map((coordinate) => coordinate.value).join(" L ")} L ${width - plot.right} ${baselineY} Z`;
+  const xTicks = Array.from({ length: 5 }, (_, index) => minTime + (xSpan * index) / 4);
 
   return `
-    <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="流量图表，峰值 ${escapeHtml(formatBytes(maxBytes))}">
+    <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="流量累计曲线，总计 ${escapeHtml(formatBytes(summary.totalBytes))}">
+      <defs>
+        <linearGradient id="chart-area-gradient" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#1f6feb" stop-opacity="0.28" />
+          <stop offset="100%" stop-color="#1f6feb" stop-opacity="0.02" />
+        </linearGradient>
+      </defs>
       ${ticks
         .map((tick) => {
           const y = plot.top + (1 - tick / axisMax) * plotHeight;
@@ -360,17 +402,74 @@ function drawChart(summary) {
           `;
         })
         .join("")}
-      <line class="chart-axis" x1="${plot.left}" y1="${height - plot.bottom}" x2="${width - plot.right}" y2="${height - plot.bottom}" />
-      <line class="chart-axis" x1="${plot.left}" y1="${plot.top}" x2="${plot.left}" y2="${height - plot.bottom}" />
-      <polyline points="${coordinates.map((coordinate) => coordinate.value).join(" ")}" fill="none" stroke="#1f6feb" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" />
+      ${xTicks.map((timestamp, index) => {
+        const x = plot.left + (plotWidth * index) / 4;
+        return `
+          <line class="chart-x-tick" x1="${x.toFixed(1)}" y1="${baselineY}" x2="${x.toFixed(1)}" y2="${baselineY + 5}" />
+          <text class="chart-axis-label" x="${x.toFixed(1)}" y="${height - 16}" text-anchor="${index === 0 ? "start" : index === 4 ? "end" : "middle"}">${escapeHtml(formatChartAxisTime(timestamp, summary.range))}</text>
+        `;
+      }).join("")}
+      <line class="chart-axis" x1="${plot.left}" y1="${baselineY}" x2="${width - plot.right}" y2="${baselineY}" />
+      <path class="chart-area" d="${areaPath}" />
+      <polyline class="chart-line" points="${lineValues.join(" ")}" />
       ${points
         .map((point, index) => {
-          const { x, y } = coordinates[index];
-          return `<circle cx="${x}" cy="${y}" r="4" fill="#168a53"><title>${formatBytes(point.bytes)}，${formatTime(point.timestamp)}</title></circle>`;
+          const { plottedBytes, x, y } = coordinates[index];
+          const label = `${formatTime(point.timestamp)}，累计 ${formatBytes(plottedBytes)}，本时段 ${formatBytes(point.bytes)}`;
+          return `
+            <g class="chart-point" data-chart-point data-bytes="${point.bytes}" data-cumulative-bytes="${plottedBytes}" data-timestamp="${point.timestamp}" data-bucket-ms="${summary.bucketMs || 0}" tabindex="0" role="button" aria-label="${escapeHtml(label)}">
+              <circle class="chart-hit-area" cx="${x}" cy="${y}" r="13" />
+              <circle class="chart-dot" cx="${x}" cy="${y}" r="4" />
+              <title>${escapeHtml(label)}</title>
+            </g>
+          `;
         })
         .join("")}
     </svg>
+    <div class="chart-tooltip" role="status" aria-live="polite" hidden></div>
   `;
+}
+
+function bindChartInteractions() {
+  for (const chart of document.querySelectorAll(".chart")) {
+    const tooltip = chart.querySelector(".chart-tooltip");
+    if (!tooltip) continue;
+
+    const showTooltip = (point) => {
+      const dot = point.querySelector(".chart-dot");
+      if (!dot) return;
+      const chartRect = chart.getBoundingClientRect();
+      const dotRect = dot.getBoundingClientRect();
+      const timestamp = Number(point.dataset.timestamp);
+      const bytes = Number(point.dataset.bytes);
+      const cumulativeBytes = Number(point.dataset.cumulativeBytes);
+      const bucketMs = Number(point.dataset.bucketMs);
+
+      tooltip.innerHTML = `
+        <strong>${escapeHtml(formatBytes(cumulativeBytes))}</strong>
+        <span>${escapeHtml(formatTime(timestamp))}</span>
+        <span>本 ${escapeHtml(formatBucketDuration(bucketMs))}：${escapeHtml(formatBytes(bytes))}</span>
+      `;
+      tooltip.hidden = false;
+      const rawLeft = dotRect.left - chartRect.left + dotRect.width / 2;
+      tooltip.style.left = `${Math.min(chartRect.width - 86, Math.max(86, rawLeft))}px`;
+      tooltip.style.top = `${Math.max(88, dotRect.top - chartRect.top - 10)}px`;
+    };
+
+    const hideTooltip = () => {
+      tooltip.hidden = true;
+    };
+
+    for (const point of chart.querySelectorAll("[data-chart-point]")) {
+      point.addEventListener("pointerenter", () => showTooltip(point));
+      point.addEventListener("focus", () => showTooltip(point));
+      point.addEventListener("click", () => showTooltip(point));
+    }
+    chart.addEventListener("pointerleave", hideTooltip);
+    chart.addEventListener("focusout", (event) => {
+      if (!chart.contains(event.relatedTarget)) hideTooltip();
+    });
+  }
 }
 
 function metricCard(label, value, detail, statusClass = "") {
@@ -580,13 +679,21 @@ function renderNodeTokenNotice() {
   `;
 }
 
-function renderNodeCheckboxes(nodes = [], selected = new Set()) {
-  if (nodes.length === 0) {
-    return `<div class="subtle">还没有节点，先到“节点”页面创建。</div>`;
-  }
+function renderNodeCheckboxes(nodes = [], selected = new Set(), currentNode = null) {
+  const usesCurrentNode = selected.size === 0;
 
   return `
     <div class="node-checks">
+      ${currentNode ? `
+        <label class="check-card current-node-check">
+          <input type="checkbox" ${usesCurrentNode ? "checked" : ""} disabled>
+          <span>
+            <strong>${escapeHtml(currentNode.name)} <span class="tag">内置</span></strong>
+            <small>${escapeHtml(nodeEndpoint(currentNode))}</small>
+            <small>${usesCurrentNode ? "当前订阅默认使用" : "未授权扩展节点时自动回退"}</small>
+          </span>
+        </label>
+      ` : ""}
       ${nodes.map((node) => `
         <label class="check-card">
           <input type="checkbox" name="nodeIds" value="${escapeHtml(node.id)}" ${selected.has(node.id) ? "checked" : ""}>
@@ -596,12 +703,14 @@ function renderNodeCheckboxes(nodes = [], selected = new Set()) {
           </span>
         </label>
       `).join("")}
+      ${nodes.length === 0 ? `<div class="subtle node-empty-note">如需精确到用户的流量统计，请创建提供独立端口的扩展节点。</div>` : ""}
     </div>
   `;
 }
 
 function renderNodesIndex() {
-  const nodes = state.nodes?.nodes || [];
+  const managedNodes = state.nodes?.nodes || [];
+  const nodes = [state.nodes?.currentNode, ...managedNodes].filter(Boolean);
 
   renderShell(
     `
@@ -663,15 +772,17 @@ function renderNodesIndex() {
                     <div class="subtle">${escapeHtml(node.lastHeartbeatAt ? formatTime(node.lastHeartbeatAt) : "从未心跳")}</div>
                     ${node.lastError ? `<div class="event-detail">${escapeHtml(node.lastError)}</div>` : ""}
                   </td>
-                  <td>${escapeHtml(String(node.publicPortEnd - node.publicPortStart + 1))} 个</td>
+                  <td>${node.current ? `固定端口 <span class="tag">内置</span>` : `${escapeHtml(String(node.publicPortEnd - node.publicPortStart + 1))} 个`}</td>
                   <td>${escapeHtml(String(node.assignedUserCount || 0))}</td>
                   <td>
                     <div>${escapeHtml(String(node.load?.activeServers ?? 0))} 个端口</div>
                     <div class="subtle">Load ${escapeHtml((node.load?.loadAvg || []).slice(0, 3).map((item) => Number(item).toFixed(2)).join(" / ") || "未知")}</div>
                   </td>
                   <td>
-                    <button class="small-link" data-node-toggle="${escapeHtml(node.id)}">${node.status === "active" ? "停用" : "启用"}</button>
-                    <button class="small-link" data-node-reset="${escapeHtml(node.id)}">重置令牌</button>
+                    ${node.current
+                      ? `<span class="subtle">由部署配置管理</span>`
+                      : `<button class="small-link" data-node-toggle="${escapeHtml(node.id)}">${node.status === "active" ? "停用" : "启用"}</button>
+                         <button class="small-link" data-node-reset="${escapeHtml(node.id)}">重置令牌</button>`}
                   </td>
                 </tr>
               `).join("")}
@@ -726,7 +837,7 @@ function renderUsersIndex() {
           </div>
           <div class="field node-field">
             <label>可用节点</label>
-            ${renderNodeCheckboxes(payload.nodes || [])}
+            ${renderNodeCheckboxes(payload.nodes || [], new Set(), payload.currentNode)}
           </div>
           <div class="form-actions">
             <button class="primary" type="submit">创建用户</button>
@@ -739,10 +850,10 @@ function renderUsersIndex() {
           <h2>用户列表</h2>
         </div>
         <table>
-          <thead><tr><th>用户</th><th>状态</th><th>配额</th><th>订阅访问</th><th>创建时间</th><th>操作</th></tr></thead>
+          <thead><tr><th>用户</th><th>状态</th><th>流量</th><th>配额</th><th>订阅访问</th><th>创建时间</th><th>操作</th></tr></thead>
           <tbody>
             ${users.length === 0
-              ? `<tr><td colspan="6" class="subtle">还没有用户</td></tr>`
+              ? `<tr><td colspan="7" class="subtle">还没有用户</td></tr>`
               : users.map((user) => `
                 <tr>
                   <td>
@@ -750,6 +861,11 @@ function renderUsersIndex() {
                     ${user.note ? `<div class="subtle">${escapeHtml(user.note)}</div>` : ""}
                   </td>
                   <td><span class="status-pill"><span class="dot ${userStatusClass(user.status)}"></span>${escapeHtml(formatUserStatus(user.status))}</span></td>
+                  <td>
+                    ${user.trafficReliable
+                      ? `<strong>${escapeHtml(formatBytes(user.trafficBytes))}</strong><div class="subtle">${escapeHtml(RANGE_LABELS[state.range])}</div>`
+                      : `<span class="subtle">不可单独区分</span><div class="subtle">共享总量 ${escapeHtml(formatBytes(payload.sharedTraffic?.totalBytes))}</div>`}
+                  </td>
                   <td>${escapeHtml(formatQuota(user))}</td>
                   <td>
                     <div>${escapeHtml(String(user.accessCount || 0))} 次</div>
@@ -782,6 +898,9 @@ function renderUserDetail() {
   const selectedNodes = checkedNodeIds(detail.nodeAssignments || []);
   const userTraffic = detail.userTraffic || {};
   const sharedTraffic = detail.sharedTraffic || {};
+  const reliableUserTraffic = Boolean(detail.trafficMode?.perUserReliable && selectedNodes.size > 0);
+  const visibleTraffic = reliableUserTraffic ? userTraffic : sharedTraffic;
+  const visibleTrafficTitle = reliableUserTraffic ? "个人流量" : "当前节点共享流量";
 
   renderShell(
     `
@@ -797,9 +916,22 @@ function renderUserDetail() {
       <section class="metrics">
         ${metricCard("状态", `<span class="status-pill"><span class="dot ${userStatusClass(user.status)}"></span>${escapeHtml(formatUserStatus(user.status))}</span>`, user.status === "active" ? "订阅可正常拉取" : "订阅接口会返回不可用")}
         ${metricCard("配额", escapeHtml(formatQuota(user)), "共享端口模式下仅作资料记录")}
-        ${metricCard("授权节点", escapeHtml(String(selectedNodes.size)), "用户订阅会输出这些节点")}
-        ${metricCard("个人流量", escapeHtml(formatBytes(userTraffic.totalBytes)), detail.trafficMode?.perUserReliable ? `当前范围：${RANGE_LABELS[state.range]}` : "共享端口模式不产生精确数据")}
+        ${metricCard("订阅节点", escapeHtml(String(selectedNodes.size || 1)), selectedNodes.size > 0 ? "用户订阅会输出这些扩展节点" : "当前使用内置节点")}
+        ${metricCard("个人流量", reliableUserTraffic ? escapeHtml(formatBytes(userTraffic.totalBytes)) : "—", reliableUserTraffic ? `当前范围：${RANGE_LABELS[state.range]}` : "共享端口无法精确归属")}
         ${metricCard("共享端口流量", escapeHtml(formatBytes(sharedTraffic.totalBytes)), `当前范围：${RANGE_LABELS[state.range]}`)}
+      </section>
+
+      <section class="panel">
+        <div class="panel-header chart-panel-header">
+          <div>
+            <h2>${visibleTrafficTitle}</h2>
+            <div class="subtle">${reliableUserTraffic ? `该用户在扩展节点上的累计使用量` : `这是内置节点的共享总量，不等同于 ${escapeHtml(user.name)} 的个人用量`}</div>
+          </div>
+          <div class="tabs">
+            ${["1h", "24h", "7d"].map((range) => `<button data-user-range="${range}" class="${state.range === range ? "active" : ""}">${RANGE_LABELS[range]}</button>`).join("")}
+          </div>
+        </div>
+        <div class="chart">${drawChart(visibleTraffic)}</div>
       </section>
 
       <section class="panel">
@@ -825,7 +957,7 @@ function renderUserDetail() {
           <h2>可用节点</h2>
         </div>
         <form id="user-nodes-form" class="node-assignment-form">
-          ${renderNodeCheckboxes(nodes, selectedNodes)}
+          ${renderNodeCheckboxes(nodes, selectedNodes, detail.currentNode)}
           <div class="form-actions">
             <button class="primary" type="submit">保存节点授权</button>
           </div>
@@ -856,6 +988,7 @@ function renderUserDetail() {
     { nav: "users", showRefresh: true }
   );
 
+  bindChartInteractions();
   bindUserDetailEvents();
 }
 
@@ -953,7 +1086,7 @@ function renderDashboard() {
   const online = Boolean(status?.manager?.online);
 
   const warnings = status?.configWarnings || [];
-  const nodes = status?.nodes || [];
+  const nodes = [status?.currentNode, ...(status?.nodes || [])].filter(Boolean);
   const onlineNodeCount = nodes.filter((node) => node.online).length;
   const servers = status?.servers || [];
   const events = state.events || [];
@@ -966,7 +1099,7 @@ function renderDashboard() {
             `<span class="status-pill"><span class="dot ${online ? "online" : "offline"}"></span>${online ? "在线" : "离线"}</span>`,
             status?.manager?.lastError || `管理接口 ${status?.manager?.host || ""}:${status?.manager?.port || ""}`
           )}
-          ${metricCard("多节点", escapeHtml(`${onlineNodeCount} / ${nodes.length}`), "在线节点 / 已配置节点")}
+          ${metricCard("节点", escapeHtml(`${onlineNodeCount} / ${nodes.length}`), "在线节点 / 全部节点（含当前节点）")}
           ${metricCard("当前计数器", escapeHtml(formatBytes(status?.traffic?.currentTotalBytes)), "最近一次 ssmanager 返回的总量")}
           ${metricCard("已记录流量", escapeHtml(formatBytes(status?.traffic?.recordedTotalBytes)), `当前范围：${formatBytes(traffic?.totalBytes)}`)}
           ${metricCard("后台运行时间", escapeHtml(formatDuration(status?.admin?.uptimeSeconds)), `启动于 ${formatTime(status?.admin?.startedAt)}`)}
@@ -1043,6 +1176,7 @@ function renderDashboard() {
     { nav: "dashboard", showRefresh: true }
   );
 
+  bindChartInteractions();
   for (const button of document.querySelectorAll("[data-range]")) {
     button.addEventListener("click", async () => {
       state.range = button.dataset.range;
@@ -1335,6 +1469,14 @@ function bindUserDetailEvents() {
   const user = detail?.user;
   if (!user) return;
 
+  for (const button of document.querySelectorAll("[data-user-range]")) {
+    button.addEventListener("click", async () => {
+      state.range = button.dataset.userRange;
+      await loadUserDetail(user.id);
+      renderCurrentRoute();
+    });
+  }
+
   const toggle = document.querySelector("#user-toggle-status");
   if (toggle) {
     toggle.addEventListener("click", async () => {
@@ -1440,7 +1582,7 @@ async function navigate(pathname) {
 }
 
 async function loadUsers() {
-  state.users = await api("/api/users");
+  state.users = await api(`/api/users?range=${encodeURIComponent(state.range)}`);
 }
 
 async function loadNodes() {

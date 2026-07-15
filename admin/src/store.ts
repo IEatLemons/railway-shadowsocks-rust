@@ -21,10 +21,12 @@ export type StoredEvent = {
 
 export type TrafficPoint = {
   bytes: number;
+  cumulativeBytes: number;
   timestamp: number;
 };
 
 export type TrafficSummary = {
+  bucketMs: number;
   points: TrafficPoint[];
   range: string;
   since: number;
@@ -267,6 +269,12 @@ function rangeToMs(range: string): number {
 
 function normalizeRange(range: string): "1h" | "24h" | "7d" {
   return range === "1h" || range === "7d" ? range : "24h";
+}
+
+function trafficBucketMs(range: "1h" | "24h" | "7d"): number {
+  if (range === "1h") return 5 * 60 * 1000;
+  if (range === "7d") return 6 * 60 * 60 * 1000;
+  return 60 * 60 * 1000;
 }
 
 function stringifyDetail(detail: unknown): string | null {
@@ -528,8 +536,11 @@ function trafficSummaryFromRows(
 ): TrafficSummary {
   const normalizedRange = normalizeRange(range);
   const since = until - rangeToMs(normalizedRange);
+  const bucketMs = trafficBucketMs(normalizedRange);
+  const bucketCount = Math.ceil((until - since) / bucketMs);
   const previous = new Map<string, number>();
-  const pointsByTimestamp = new Map<number, number>();
+  const buckets = Array.from({ length: bucketCount }, () => 0);
+  let hasSampleInRange = false;
   let totalBytes = 0;
 
   for (const row of rows) {
@@ -538,16 +549,29 @@ function trafficSummaryFromRows(
     const delta = last === undefined ? 0 : row.bytes >= last ? row.bytes - last : row.bytes;
     previous.set(key, row.bytes);
 
+    if (row.ts < since || row.ts > until) continue;
+    hasSampleInRange = true;
+
     if (delta <= 0) continue;
     totalBytes += delta;
-    pointsByTimestamp.set(row.ts, (pointsByTimestamp.get(row.ts) || 0) + delta);
+    const bucketIndex = Math.min(bucketCount - 1, Math.max(0, Math.floor((row.ts - since) / bucketMs)));
+    buckets[bucketIndex] += delta;
   }
 
-  const points = Array.from(pointsByTimestamp.entries())
-    .sort(([left], [right]) => left - right)
-    .map(([timestamp, bytes]) => ({ bytes, timestamp }));
+  let cumulativeBytes = 0;
+  const points = hasSampleInRange
+    ? buckets.map((bytes, index) => {
+      cumulativeBytes += bytes;
+      return {
+        bytes,
+        cumulativeBytes,
+        timestamp: Math.min(until, since + (index + 1) * bucketMs)
+      };
+    })
+    : [];
 
   return {
+    bucketMs,
     points,
     range: normalizedRange,
     since,
@@ -1127,8 +1151,25 @@ export function openStore(preferredDataDir: string): Store {
       const until = Date.now();
       const since = until - rangeToMs(normalizedRange);
       const rows = db
-        .prepare("SELECT node_id, port, ts, bytes FROM traffic_samples WHERE ts >= ? AND user_id IS NULL ORDER BY COALESCE(node_id, ''), port, ts")
-        .all(since) as Array<{ bytes: number; node_id: string | null; port: string; ts: number }>;
+        .prepare(`
+          SELECT node_id, port, ts, bytes
+          FROM (
+            SELECT s.node_id, s.port, s.ts, s.bytes
+            FROM traffic_samples s
+            JOIN (
+              SELECT COALESCE(node_id, '') AS node_key, port, MAX(id) AS id
+              FROM traffic_samples
+              WHERE ts < ? AND user_id IS NULL
+              GROUP BY COALESCE(node_id, ''), port
+            ) baseline ON baseline.id = s.id
+            UNION ALL
+            SELECT node_id, port, ts, bytes
+            FROM traffic_samples
+            WHERE ts >= ? AND user_id IS NULL
+          ) samples
+          ORDER BY COALESCE(node_id, ''), port, ts
+        `)
+        .all(since, since) as Array<{ bytes: number; node_id: string | null; port: string; ts: number }>;
 
       return trafficSummaryFromRows(normalizeSampleRows(rows), normalizedRange, until);
     },
@@ -1137,8 +1178,25 @@ export function openStore(preferredDataDir: string): Store {
       const until = Date.now();
       const since = until - rangeToMs(normalizedRange);
       const rows = db
-        .prepare("SELECT node_id, port, ts, bytes FROM traffic_samples WHERE ts >= ? AND user_id = ? ORDER BY COALESCE(node_id, ''), port, ts")
-        .all(since, userId) as Array<{ bytes: number; node_id: string | null; port: string; ts: number }>;
+        .prepare(`
+          SELECT node_id, port, ts, bytes
+          FROM (
+            SELECT s.node_id, s.port, s.ts, s.bytes
+            FROM traffic_samples s
+            JOIN (
+              SELECT COALESCE(node_id, '') AS node_key, port, MAX(id) AS id
+              FROM traffic_samples
+              WHERE ts < ? AND user_id = ?
+              GROUP BY COALESCE(node_id, ''), port
+            ) baseline ON baseline.id = s.id
+            UNION ALL
+            SELECT node_id, port, ts, bytes
+            FROM traffic_samples
+            WHERE ts >= ? AND user_id = ?
+          ) samples
+          ORDER BY COALESCE(node_id, ''), port, ts
+        `)
+        .all(since, userId, since, userId) as Array<{ bytes: number; node_id: string | null; port: string; ts: number }>;
 
       return trafficSummaryFromRows(normalizeSampleRows(rows), normalizedRange, until);
     },
@@ -1846,20 +1904,40 @@ export async function openPostgresStore(databaseUrl: string): Promise<Store> {
       const normalizedRange = normalizeRange(range);
       const until = Date.now();
       const since = until - rangeToMs(normalizedRange);
-      const result = await pool.query(
-        "SELECT node_id, port, ts, bytes FROM traffic_samples WHERE ts >= $1 AND user_id IS NULL ORDER BY COALESCE(node_id, ''), port, ts",
-        [since]
-      );
+      const result = await pool.query(`
+        SELECT node_id, port, ts, bytes
+        FROM (
+          SELECT DISTINCT ON (COALESCE(node_id, ''), port) node_id, port, ts, bytes
+          FROM traffic_samples
+          WHERE ts < $1 AND user_id IS NULL
+          ORDER BY COALESCE(node_id, ''), port, ts DESC, id DESC
+        ) baseline
+        UNION ALL
+        SELECT node_id, port, ts, bytes
+        FROM traffic_samples
+        WHERE ts >= $1 AND user_id IS NULL
+        ORDER BY node_id, port, ts
+      `, [since]);
       return trafficSummaryFromRows(normalizeSampleRows(result.rows), normalizedRange, until);
     },
     async getTrafficByUser(userId: string, range: string): Promise<TrafficSummary> {
       const normalizedRange = normalizeRange(range);
       const until = Date.now();
       const since = until - rangeToMs(normalizedRange);
-      const result = await pool.query(
-        "SELECT node_id, port, ts, bytes FROM traffic_samples WHERE ts >= $1 AND user_id = $2 ORDER BY COALESCE(node_id, ''), port, ts",
-        [since, userId]
-      );
+      const result = await pool.query(`
+        SELECT node_id, port, ts, bytes
+        FROM (
+          SELECT DISTINCT ON (COALESCE(node_id, ''), port) node_id, port, ts, bytes
+          FROM traffic_samples
+          WHERE ts < $1 AND user_id = $2
+          ORDER BY COALESCE(node_id, ''), port, ts DESC, id DESC
+        ) baseline
+        UNION ALL
+        SELECT node_id, port, ts, bytes
+        FROM traffic_samples
+        WHERE ts >= $1 AND user_id = $2
+        ORDER BY node_id, port, ts
+      `, [since, userId]);
       return trafficSummaryFromRows(normalizeSampleRows(result.rows), normalizedRange, until);
     },
     async getActiveSubscriptionTokenValue(userId: string): Promise<string | null> {

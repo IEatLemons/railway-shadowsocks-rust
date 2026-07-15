@@ -16,7 +16,25 @@ test("records traffic deltas and handles counter resets", () => {
 
   const summary = store.getTraffic("1h");
   assert.equal(summary.totalBytes, 70);
+  assert.equal(summary.bucketMs, 5 * 60 * 1000);
+  assert.equal(summary.points.length, 12);
+  assert.equal(summary.points.at(-1)?.cumulativeBytes, 70);
   assert.equal(store.getRecordedTotalBytes(), 70);
+
+  store.close();
+});
+
+test("uses the last sample before the selected range as the traffic baseline", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-admin-store-"));
+  const store = openStore(dir);
+  const now = Date.now();
+
+  store.recordSample({ ports: { "8388": 100 }, totalBytes: 100 }, now - 60 * 60 * 1000 - 1000);
+  store.recordSample({ ports: { "8388": 160 }, totalBytes: 160 }, now - 100);
+
+  const summary = store.getTraffic("1h");
+  assert.equal(summary.totalBytes, 60);
+  assert.equal(summary.points.at(-1)?.cumulativeBytes, 60);
 
   store.close();
 });
