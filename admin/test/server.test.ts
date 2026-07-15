@@ -160,3 +160,85 @@ test("creates per-user subscription URLs and gates disabled users", async () => 
     store.close();
   }
 });
+
+test("creates nodes, assigns users, and serves multi-node subscriptions", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-admin-server-"));
+  const config = readConfig({
+    ADMIN_PASSWORD: "secret",
+    DATA_DIR: dir,
+    PUBLIC_SS_HOST: "legacy.example.com",
+    PUBLIC_SS_PORT: "12345",
+    SS_METHOD: "aes-256-gcm",
+    SS_PASSWORD: "legacy-secret"
+  });
+  const store = openStore(dir);
+  const server = createAdminServer(config, store);
+  const baseUrl = await listen(server);
+
+  try {
+    const loginResponse = await fetch(`${baseUrl}/api/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: "admin", password: "secret" })
+    });
+    const cookie = loginResponse.headers.get("set-cookie")?.split(";")[0] || "";
+    assert.ok(cookie);
+
+    const nodeResponse = await fetch(`${baseUrl}/api/nodes`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: cookie
+      },
+      body: JSON.stringify({
+        name: "HK 1",
+        publicHost: "hk.example.com",
+        publicPortStart: 20000,
+        publicPortEnd: 20002,
+        ssMethod: "chacha20-ietf-poly1305"
+      })
+    });
+    assert.equal(nodeResponse.status, 201);
+    const createdNode = await nodeResponse.json();
+    assert.ok(createdNode.token);
+
+    const createUserResponse = await fetch(`${baseUrl}/api/users`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: cookie
+      },
+      body: JSON.stringify({ name: "Carol", nodeIds: [createdNode.node.id] })
+    });
+    assert.equal(createUserResponse.status, 201);
+    const createdUser = await createUserResponse.json();
+
+    const syncResponse = await fetch(`${baseUrl}/api/node-agent/sync`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${createdNode.token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        nodeId: createdNode.node.id,
+        traffic: {},
+        load: { activeServers: 0, managerOnline: true }
+      })
+    });
+    assert.equal(syncResponse.status, 200);
+    const sync = await syncResponse.json();
+    assert.equal(sync.assignments.length, 1);
+    assert.equal(sync.assignments[0].serverPort, 20000);
+
+    const clashResponse = await fetch(createdUser.subscription.clashUrl);
+    assert.equal(clashResponse.status, 200);
+    const clash = await clashResponse.text();
+    assert.match(clash, /server: hk\.example\.com/);
+    assert.match(clash, /port: 20000/);
+    assert.match(clash, /cipher: chacha20-ietf-poly1305/);
+    assert.doesNotMatch(clash, /legacy-secret/);
+  } finally {
+    await close(server);
+    store.close();
+  }
+});

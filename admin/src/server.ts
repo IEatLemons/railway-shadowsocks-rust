@@ -154,11 +154,25 @@ function subscriptionReady(config: AppConfig): string | null {
   return null;
 }
 
-function userTrafficMode() {
+function bearerToken(req: IncomingMessage): string {
+  const header = String(req.headers.authorization || "");
+  const match = /^Bearer\s+(.+)$/i.exec(header);
+  return match ? match[1].trim() : "";
+}
+
+function userTrafficMode(hasNodes = false) {
+  if (hasNodes) {
+    return {
+      mode: "multi_node_per_user_port",
+      perUserReliable: true,
+      message: "多节点模式已启用：每个用户在每个节点使用独立端口和密码，后台可以按用户统计并按配额停用。"
+    };
+  }
+
   return {
     mode: "shared_port",
     perUserReliable: false,
-    message: "当前为共享端口模式，后台只能记录端口总流量，不能可靠区分每个用户的代理流量。"
+    message: "当前还没有配置多节点，未授权节点的用户会回退到共享端口模式，不能可靠区分每个用户的代理流量。"
   };
 }
 
@@ -256,18 +270,29 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
       return true;
     }
 
-    const notReady = subscriptionReady(config);
-    if (notReady) {
-      text(res, 503, notReady);
+    const assignedNodes = await store.getUserNodeAssignments(found.user.id);
+    const activeNodes = await store.getSubscriptionNodesForUser(found.user.id);
+    const hasNodeAssignments = assignedNodes.some((assignment) => assignment.enabled);
+
+    if (hasNodeAssignments && activeNodes.length === 0) {
+      text(res, 503, "No active nodes are available for this subscription");
       return true;
+    }
+
+    if (activeNodes.length === 0) {
+      const notReady = subscriptionReady(config);
+      if (notReady) {
+        text(res, 503, notReady);
+        return true;
+      }
     }
 
     if (format === "clash") {
-      content(res, 200, buildUserClashYaml(config, found.user), "text/yaml; charset=utf-8");
+      content(res, 200, buildUserClashYaml(config, found.user, activeNodes), "text/yaml; charset=utf-8");
       return true;
     }
 
-    content(res, 200, buildUserSsSubscription(config, found.user), "text/plain; charset=utf-8");
+    content(res, 200, buildUserSsSubscription(config, found.user, activeNodes), "text/plain; charset=utf-8");
     return true;
   }
 
@@ -315,17 +340,94 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
       return json(res, 200, buildClientConfig(config));
     }
 
+    if (url.pathname === "/api/node-agent/sync") {
+      if (req.method !== "POST") return methodNotAllowed(res);
+
+      try {
+        const body = await readJsonBody(req);
+        const nodeId = String(body.nodeId || "").trim();
+        const token = bearerToken(req) || String(body.token || "").trim();
+        if (!nodeId || !token) return json(res, 401, { error: "unauthorized" });
+
+        const result = await store.syncNodeAgent(nodeId, token, {
+          lastError: body.lastError,
+          load: body.load,
+          traffic: body.traffic
+        });
+        if (!result) return json(res, 401, { error: "unauthorized" });
+        return json(res, 200, result);
+      } catch (error) {
+        return json(res, 400, { error: "bad_request", message: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
     if (!requireSession(req, res)) return;
+
+    if (url.pathname === "/api/nodes") {
+      if (req.method === "GET") {
+        return json(res, 200, { nodes: await store.listNodes() });
+      }
+
+      if (req.method === "POST") {
+        try {
+          const body = await readJsonBody(req);
+          const created = await store.createNode(body);
+          await store.recordEvent("info", "节点已创建", { nodeId: created.node.id, name: created.node.name });
+          return json(res, 201, created);
+        } catch (error) {
+          return json(res, 400, { error: "bad_request", message: error instanceof Error ? error.message : String(error) });
+        }
+      }
+
+      return methodNotAllowed(res);
+    }
+
+    const resetNodeTokenMatch = /^\/api\/nodes\/([^/]+)\/token\/reset$/.exec(url.pathname);
+    if (resetNodeTokenMatch) {
+      if (req.method !== "POST") return methodNotAllowed(res);
+      const nodeId = decodeURIComponent(resetNodeTokenMatch[1]);
+      const created = await store.resetNodeToken(nodeId);
+      if (!created) return json(res, 404, { error: "not_found" });
+      await store.recordEvent("info", "节点令牌已重置", { nodeId: created.node.id, name: created.node.name });
+      return json(res, 200, created);
+    }
+
+    const nodeMatch = /^\/api\/nodes\/([^/]+)$/.exec(url.pathname);
+    if (nodeMatch) {
+      const nodeId = decodeURIComponent(nodeMatch[1]);
+
+      if (req.method === "GET") {
+        const detail = await store.getNodeDetail(nodeId);
+        if (!detail) return json(res, 404, { error: "not_found" });
+        return json(res, 200, detail);
+      }
+
+      if (req.method === "PATCH") {
+        try {
+          const body = await readJsonBody(req);
+          const node = await store.updateNode(nodeId, body);
+          if (!node) return json(res, 404, { error: "not_found" });
+          await store.recordEvent("info", "节点已更新", { nodeId: node.id, name: node.name, status: node.status });
+          return json(res, 200, { node });
+        } catch (error) {
+          return json(res, 400, { error: "bad_request", message: error instanceof Error ? error.message : String(error) });
+        }
+      }
+
+      return methodNotAllowed(res);
+    }
 
     if (url.pathname === "/api/users") {
       if (req.method === "GET") {
         const users = await store.listUsers();
+        const nodes = await store.listNodes();
         return json(res, 200, {
+          nodes,
           storage: {
             backend: store.backend,
             dataDir: store.dataDir
           },
-          trafficMode: userTrafficMode(),
+          trafficMode: userTrafficMode(nodes.length > 0),
           users
         });
       }
@@ -335,9 +437,10 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
           const body = await readJsonBody(req);
           const created = await store.createUser(body);
           await store.recordEvent("info", "用户已创建", { userId: created.user.id, name: created.user.name });
+          const nodes = await store.listNodes();
           return json(res, 201, {
             subscription: subscriptionPayload(req, config, created),
-            trafficMode: userTrafficMode(),
+            trafficMode: userTrafficMode(nodes.length > 0),
             user: created.user
           });
         } catch (error) {
@@ -363,6 +466,27 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
       });
     }
 
+    const userNodesMatch = /^\/api\/users\/([^/]+)\/nodes$/.exec(url.pathname);
+    if (userNodesMatch) {
+      if (req.method !== "PUT") return methodNotAllowed(res);
+
+      try {
+        const userId = decodeURIComponent(userNodesMatch[1]);
+        const body = await readJsonBody(req);
+        const assignments = await store.updateUserNodeAssignments(userId, body.nodeIds);
+        if (!assignments) return json(res, 404, { error: "not_found" });
+        await store.recordEvent("info", "用户节点授权已更新", { userId, nodeIds: body.nodeIds });
+        const nodes = await store.listNodes();
+        return json(res, 200, {
+          assignments,
+          nodes,
+          trafficMode: userTrafficMode(nodes.length > 0)
+        });
+      } catch (error) {
+        return json(res, 400, { error: "bad_request", message: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
     const userMatch = /^\/api\/users\/([^/]+)$/.exec(url.pathname);
     if (userMatch) {
       const userId = decodeURIComponent(userMatch[1]);
@@ -372,12 +496,15 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
         const detail = await store.getUserDetail(userId);
         if (!detail) return json(res, 404, { error: "not_found" });
         const activeToken = await store.getActiveSubscriptionTokenValue(userId);
+        const nodes = await store.listNodes();
         return json(res, 200, {
           ...detail,
           subscription: activeToken ? subscriptionUrls(req, config, activeToken) : null,
           subscriptionUnavailableReason: detail.activeToken && !activeToken ? "active_token_not_recoverable" : null,
+          nodeAssignments: await store.getUserNodeAssignments(userId),
+          nodes,
           sharedTraffic: await store.getTraffic(range),
-          trafficMode: userTrafficMode(),
+          trafficMode: userTrafficMode(nodes.length > 0),
           userTraffic: await store.getTrafficByUser(userId, range)
         });
       }
@@ -391,7 +518,8 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
           }
           if (!user) return json(res, 404, { error: "not_found" });
           await store.recordEvent("info", "用户已更新", { userId: user.id, name: user.name, status: user.status });
-          return json(res, 200, { trafficMode: userTrafficMode(), user });
+          const nodes = await store.listNodes();
+          return json(res, 200, { trafficMode: userTrafficMode(nodes.length > 0), user });
         } catch (error) {
           return json(res, 400, { error: "bad_request", message: error instanceof Error ? error.message : String(error) });
         }
@@ -418,6 +546,7 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
       if (req.method !== "GET") return methodNotAllowed(res);
       const snapshot = await readManagerSnapshot();
       const latestSamples = await store.getLatestSamples();
+      const nodes = await store.listNodes();
       return json(res, 200, {
         admin: {
           dataDir: store.dataDir,
@@ -435,6 +564,7 @@ export function createAdminServer(config: AppConfig, store: Store): http.Server 
           pingRaw: snapshot.pingRaw,
           port: config.managerPort
         },
+        nodes,
         shadowsocks: {
           method: config.ssMethod,
           passwordConfigured: config.ssPasswordConfigured,

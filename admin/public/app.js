@@ -19,7 +19,11 @@ const EVENT_MESSAGE_LABELS = {
   "Admin service stopped": "管理服务已停止",
   "用户已创建": "用户已创建",
   "用户已更新": "用户已更新",
+  "用户节点授权已更新": "用户节点授权已更新",
   "用户订阅地址已重置": "用户订阅地址已重置",
+  "节点令牌已重置": "节点令牌已重置",
+  "节点已创建": "节点已创建",
+  "节点已更新": "节点已更新",
   "Manager connection failed": "管理接口连接失败",
   "Unhandled API error": "后台接口异常"
 };
@@ -59,6 +63,9 @@ let state = {
     password: "",
     warnings: []
   },
+  nodeError: "",
+  nodeToken: null,
+  nodes: null,
   range: "24h",
   status: null,
   traffic: null,
@@ -134,6 +141,31 @@ function userStatusClass(status) {
   return "offline";
 }
 
+function nodeStatusClass(node) {
+  if (node?.status !== "active") return "offline";
+  return node.online ? "online" : "warning";
+}
+
+function formatNodeStatus(node) {
+  if (node?.status !== "active") return "停用";
+  return node.online ? "在线" : "等待心跳";
+}
+
+function nodeEndpoint(node) {
+  if (!node) return "";
+  return node.publicPortStart === node.publicPortEnd
+    ? `${node.publicHost}:${node.publicPortStart}`
+    : `${node.publicHost}:${node.publicPortStart}-${node.publicPortEnd}`;
+}
+
+function checkedNodeIds(assignments = []) {
+  return new Set(assignments.filter((assignment) => assignment.enabled).map((assignment) => assignment.nodeId));
+}
+
+function selectedNodeIdsFromForm(form) {
+  return Array.from(form.querySelectorAll("input[name='nodeIds']:checked")).map((input) => input.value);
+}
+
 function getRoute() {
   const pathname = window.location.pathname.replace(/\/+$/, "") || "/";
 
@@ -143,6 +175,10 @@ function getRoute() {
 
   if (pathname === "/users") {
     return { name: "users", nav: "users" };
+  }
+
+  if (pathname === "/nodes") {
+    return { name: "nodes", nav: "nodes" };
   }
 
   const userMatch = /^\/users\/([^/]+)$/.exec(pathname);
@@ -361,6 +397,7 @@ function renderShell(content, options = {}) {
           <nav class="top-nav" aria-label="主导航">
             <a class="nav-link ${nav === "dashboard" ? "active" : ""}" href="/" data-route-link>仪表盘</a>
             <a class="nav-link ${nav === "users" ? "active" : ""}" href="/users" data-route-link>用户</a>
+            <a class="nav-link ${nav === "nodes" ? "active" : ""}" href="/nodes" data-route-link>节点</a>
             <a class="nav-link ${nav === "tools" ? "active" : ""}" href="/tools" data-route-link>工具</a>
             <a class="nav-link" href="/guide" target="_blank" rel="noopener">使用说明</a>
           </nav>
@@ -512,6 +549,142 @@ function renderSharedTrafficWarning(trafficMode) {
   `;
 }
 
+function renderNodeTokenNotice() {
+  const token = state.nodeToken;
+  if (!token) return "";
+
+  return `
+    <section class="panel subscription-result">
+      <div class="panel-header">
+        <h2>节点接入信息</h2>
+        <button id="node-token-dismiss">隐藏</button>
+      </div>
+      <div class="warning">节点令牌只会显示一次，请保存到节点服务的环境变量。</div>
+      <div class="subscription-links">
+        <div class="field">
+          <label>NODE_ID</label>
+          <div class="copy-row">
+            <code>${escapeHtml(token.nodeId || "")}</code>
+            <button id="copy-node-id">复制</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>NODE_TOKEN</label>
+          <div class="copy-row">
+            <code>${escapeHtml(token.token || "")}</code>
+            <button id="copy-node-token">复制</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderNodeCheckboxes(nodes = [], selected = new Set()) {
+  if (nodes.length === 0) {
+    return `<div class="subtle">还没有节点，先到“节点”页面创建。</div>`;
+  }
+
+  return `
+    <div class="node-checks">
+      ${nodes.map((node) => `
+        <label class="check-card">
+          <input type="checkbox" name="nodeIds" value="${escapeHtml(node.id)}" ${selected.has(node.id) ? "checked" : ""}>
+          <span>
+            <strong>${escapeHtml(node.name)}</strong>
+            <small>${escapeHtml(nodeEndpoint(node))}</small>
+          </span>
+        </label>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderNodesIndex() {
+  const nodes = state.nodes?.nodes || [];
+
+  renderShell(
+    `
+      <section class="tools-header">
+        <h2>节点</h2>
+      </section>
+
+      ${state.nodeError ? `<div class="warning">${escapeHtml(state.nodeError)}</div>` : ""}
+      ${renderNodeTokenNotice()}
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>新建节点</h2>
+        </div>
+        <form id="node-create-form" class="node-form">
+          <div class="field">
+            <label for="node-name">名称</label>
+            <input id="node-name" name="name" required placeholder="hong-kong-1">
+          </div>
+          <div class="field">
+            <label for="node-host">公网地址</label>
+            <input id="node-host" name="publicHost" required placeholder="node.example.com">
+          </div>
+          <div class="field">
+            <label for="node-port-start">起始端口</label>
+            <input id="node-port-start" name="publicPortStart" type="number" min="1" max="65535" required placeholder="20000">
+          </div>
+          <div class="field">
+            <label for="node-port-end">结束端口</label>
+            <input id="node-port-end" name="publicPortEnd" type="number" min="1" max="65535" placeholder="20100">
+          </div>
+          <div class="field">
+            <label for="node-method">加密方式</label>
+            <input id="node-method" name="ssMethod" value="aes-256-gcm">
+          </div>
+          <div class="form-actions">
+            <button class="primary" type="submit">创建节点</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>节点列表</h2>
+        </div>
+        <table>
+          <thead><tr><th>节点</th><th>状态</th><th>端口池</th><th>授权用户</th><th>负载</th><th>操作</th></tr></thead>
+          <tbody>
+            ${nodes.length === 0
+              ? `<tr><td colspan="6" class="subtle">还没有节点</td></tr>`
+              : nodes.map((node) => `
+                <tr>
+                  <td>
+                    <div>${escapeHtml(node.name)}</div>
+                    <div class="subtle">${escapeHtml(nodeEndpoint(node))}</div>
+                  </td>
+                  <td>
+                    <span class="status-pill"><span class="dot ${nodeStatusClass(node)}"></span>${escapeHtml(formatNodeStatus(node))}</span>
+                    <div class="subtle">${escapeHtml(node.lastHeartbeatAt ? formatTime(node.lastHeartbeatAt) : "从未心跳")}</div>
+                    ${node.lastError ? `<div class="event-detail">${escapeHtml(node.lastError)}</div>` : ""}
+                  </td>
+                  <td>${escapeHtml(String(node.publicPortEnd - node.publicPortStart + 1))} 个</td>
+                  <td>${escapeHtml(String(node.assignedUserCount || 0))}</td>
+                  <td>
+                    <div>${escapeHtml(String(node.load?.activeServers ?? 0))} 个端口</div>
+                    <div class="subtle">Load ${escapeHtml((node.load?.loadAvg || []).slice(0, 3).map((item) => Number(item).toFixed(2)).join(" / ") || "未知")}</div>
+                  </td>
+                  <td>
+                    <button class="small-link" data-node-toggle="${escapeHtml(node.id)}">${node.status === "active" ? "停用" : "启用"}</button>
+                    <button class="small-link" data-node-reset="${escapeHtml(node.id)}">重置令牌</button>
+                  </td>
+                </tr>
+              `).join("")}
+          </tbody>
+        </table>
+      </section>
+    `,
+    { nav: "nodes", showRefresh: true }
+  );
+
+  bindNodesEvents();
+}
+
 function renderUsersIndex() {
   const payload = state.users || {};
   const users = payload.users || [];
@@ -550,6 +723,10 @@ function renderUsersIndex() {
               <option value="weekly">每周</option>
               <option value="daily">每天</option>
             </select>
+          </div>
+          <div class="field node-field">
+            <label>可用节点</label>
+            ${renderNodeCheckboxes(payload.nodes || [])}
           </div>
           <div class="form-actions">
             <button class="primary" type="submit">创建用户</button>
@@ -601,6 +778,8 @@ function renderUserDetail() {
 
   const user = detail.user;
   const accessLogs = detail.accessLogs || [];
+  const nodes = detail.nodes || [];
+  const selectedNodes = checkedNodeIds(detail.nodeAssignments || []);
   const userTraffic = detail.userTraffic || {};
   const sharedTraffic = detail.sharedTraffic || {};
 
@@ -618,7 +797,8 @@ function renderUserDetail() {
       <section class="metrics">
         ${metricCard("状态", `<span class="status-pill"><span class="dot ${userStatusClass(user.status)}"></span>${escapeHtml(formatUserStatus(user.status))}</span>`, user.status === "active" ? "订阅可正常拉取" : "订阅接口会返回不可用")}
         ${metricCard("配额", escapeHtml(formatQuota(user)), "共享端口模式下仅作资料记录")}
-        ${metricCard("个人流量", escapeHtml(formatBytes(userTraffic.totalBytes)), "预留字段，当前共享端口模式不产生精确数据")}
+        ${metricCard("授权节点", escapeHtml(String(selectedNodes.size)), "用户订阅会输出这些节点")}
+        ${metricCard("个人流量", escapeHtml(formatBytes(userTraffic.totalBytes)), detail.trafficMode?.perUserReliable ? `当前范围：${RANGE_LABELS[state.range]}` : "共享端口模式不产生精确数据")}
         ${metricCard("共享端口流量", escapeHtml(formatBytes(sharedTraffic.totalBytes)), `当前范围：${RANGE_LABELS[state.range]}`)}
       </section>
 
@@ -639,6 +819,18 @@ function renderUserDetail() {
       </section>
 
       ${renderUserSubscriptionPanel(detail)}
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>可用节点</h2>
+        </div>
+        <form id="user-nodes-form" class="node-assignment-form">
+          ${renderNodeCheckboxes(nodes, selectedNodes)}
+          <div class="form-actions">
+            <button class="primary" type="submit">保存节点授权</button>
+          </div>
+        </form>
+      </section>
 
       <section class="panel">
         <div class="panel-header">
@@ -761,6 +953,8 @@ function renderDashboard() {
   const online = Boolean(status?.manager?.online);
 
   const warnings = status?.configWarnings || [];
+  const nodes = status?.nodes || [];
+  const onlineNodeCount = nodes.filter((node) => node.online).length;
   const servers = status?.servers || [];
   const events = state.events || [];
 
@@ -772,11 +966,7 @@ function renderDashboard() {
             `<span class="status-pill"><span class="dot ${online ? "online" : "offline"}"></span>${online ? "在线" : "离线"}</span>`,
             status?.manager?.lastError || `管理接口 ${status?.manager?.host || ""}:${status?.manager?.port || ""}`
           )}
-          ${metricCard(
-            "多节点",
-            `${online ? servers.length : 0} / ${servers.length}`,
-            "在线节点 / 已配置节点"
-          )}
+          ${metricCard("多节点", escapeHtml(`${onlineNodeCount} / ${nodes.length}`), "在线节点 / 已配置节点")}
           ${metricCard("当前计数器", escapeHtml(formatBytes(status?.traffic?.currentTotalBytes)), "最近一次 ssmanager 返回的总量")}
           ${metricCard("已记录流量", escapeHtml(formatBytes(status?.traffic?.recordedTotalBytes)), `当前范围：${formatBytes(traffic?.totalBytes)}`)}
           ${metricCard("后台运行时间", escapeHtml(formatDuration(status?.admin?.uptimeSeconds)), `启动于 ${formatTime(status?.admin?.startedAt)}`)}
@@ -937,6 +1127,33 @@ function bindCurrentSubscriptionEvents() {
   }
 }
 
+function bindNodeTokenEvents() {
+  const token = state.nodeToken;
+  if (!token) return;
+
+  const dismiss = document.querySelector("#node-token-dismiss");
+  if (dismiss) {
+    dismiss.addEventListener("click", () => {
+      state.nodeToken = null;
+      renderCurrentRoute();
+    });
+  }
+
+  const nodeId = document.querySelector("#copy-node-id");
+  if (nodeId) {
+    nodeId.addEventListener("click", async (event) => {
+      await copyFromButton(event.currentTarget, token.nodeId || "", "已复制");
+    });
+  }
+
+  const nodeToken = document.querySelector("#copy-node-token");
+  if (nodeToken) {
+    nodeToken.addEventListener("click", async (event) => {
+      await copyFromButton(event.currentTarget, token.token || "", "已复制");
+    });
+  }
+}
+
 function saveMergeFormState() {
   const input = document.querySelector("#merge-input");
   const domains = document.querySelector("#merge-domains");
@@ -1027,6 +1244,7 @@ function bindUsersEvents() {
         method: "POST",
         body: JSON.stringify({
           name: formData.get("name"),
+          nodeIds: selectedNodeIdsFromForm(event.currentTarget),
           note: formData.get("note"),
           quotaBytes: quotaGbToBytes(formData.get("quotaGb")),
           quotaPeriod: formData.get("quotaPeriod")
@@ -1040,6 +1258,74 @@ function bindUsersEvents() {
       renderCurrentRoute();
     }
   });
+}
+
+function bindNodesEvents() {
+  bindNodeTokenEvents();
+
+  const form = document.querySelector("#node-create-form");
+  if (form) {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      state.nodeError = "";
+      const formData = new FormData(event.currentTarget);
+
+      try {
+        const result = await api("/api/nodes", {
+          method: "POST",
+          body: JSON.stringify({
+            name: formData.get("name"),
+            publicHost: formData.get("publicHost"),
+            publicPortStart: formData.get("publicPortStart"),
+            publicPortEnd: formData.get("publicPortEnd"),
+            ssMethod: formData.get("ssMethod")
+          })
+        });
+        state.nodeToken = { nodeId: result.node?.id, token: result.token };
+        await loadNodes();
+        renderCurrentRoute();
+      } catch (error) {
+        state.nodeError = error instanceof Error ? error.message : "创建节点失败";
+        renderCurrentRoute();
+      }
+    });
+  }
+
+  for (const button of document.querySelectorAll("[data-node-toggle]")) {
+    button.addEventListener("click", async () => {
+      const node = (state.nodes?.nodes || []).find((item) => item.id === button.dataset.nodeToggle);
+      if (!node) return;
+      state.nodeError = "";
+      try {
+        await api(`/api/nodes/${encodeURIComponent(node.id)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ status: node.status === "active" ? "disabled" : "active" })
+        });
+        await loadNodes();
+        renderCurrentRoute();
+      } catch (error) {
+        state.nodeError = error instanceof Error ? error.message : "更新节点失败";
+        renderCurrentRoute();
+      }
+    });
+  }
+
+  for (const button of document.querySelectorAll("[data-node-reset]")) {
+    button.addEventListener("click", async () => {
+      state.nodeError = "";
+      try {
+        const result = await api(`/api/nodes/${encodeURIComponent(button.dataset.nodeReset)}/token/reset`, {
+          method: "POST"
+        });
+        state.nodeToken = { nodeId: result.node?.id, token: result.token };
+        await loadNodes();
+        renderCurrentRoute();
+      } catch (error) {
+        state.nodeError = error instanceof Error ? error.message : "重置节点令牌失败";
+        renderCurrentRoute();
+      }
+    });
+  }
 }
 
 function bindUserDetailEvents() {
@@ -1086,6 +1372,27 @@ function bindUserDetailEvents() {
       }
     });
   }
+
+  const nodeForm = document.querySelector("#user-nodes-form");
+  if (nodeForm) {
+    nodeForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      state.userError = "";
+      try {
+        await api(`/api/users/${encodeURIComponent(user.id)}/nodes`, {
+          method: "PUT",
+          body: JSON.stringify({
+            nodeIds: selectedNodeIdsFromForm(event.currentTarget)
+          })
+        });
+        await loadUserDetail(user.id);
+        renderCurrentRoute();
+      } catch (error) {
+        state.userError = error instanceof Error ? error.message : "保存节点授权失败";
+        renderCurrentRoute();
+      }
+    });
+  }
 }
 
 function renderCurrentRoute() {
@@ -1098,6 +1405,11 @@ function renderCurrentRoute() {
 
   if (route.name === "users") {
     renderUsersIndex();
+    return;
+  }
+
+  if (route.name === "nodes") {
+    renderNodesIndex();
     return;
   }
 
@@ -1131,6 +1443,10 @@ async function loadUsers() {
   state.users = await api("/api/users");
 }
 
+async function loadNodes() {
+  state.nodes = await api("/api/nodes");
+}
+
 async function loadUserDetail(userId) {
   state.userSubscription = null;
   state.userDetail = await api(`/api/users/${encodeURIComponent(userId)}?range=${encodeURIComponent(state.range)}`);
@@ -1146,6 +1462,12 @@ async function refreshCurrentRoute() {
 
   if (route.name === "users") {
     await loadUsers();
+    renderCurrentRoute();
+    return;
+  }
+
+  if (route.name === "nodes") {
+    await loadNodes();
     renderCurrentRoute();
     return;
   }

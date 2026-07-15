@@ -1,25 +1,12 @@
 #!/bin/sh
 set -eu
 
-SERVICE_ROLE="${SERVICE_ROLE:-all}"
-
-case "${SERVICE_ROLE}" in
-  node|admin|all) ;;
-  *)
-    echo "SERVICE_ROLE must be one of: node, admin, all" >&2
-    exit 64
-    ;;
-esac
-
-: "${SS_PASSWORD:?SS_PASSWORD is required}"
-if [ "${SERVICE_ROLE}" = "admin" ] || [ "${SERVICE_ROLE}" = "all" ]; then
-  : "${ADMIN_PASSWORD:?ADMIN_PASSWORD is required for SERVICE_ROLE=${SERVICE_ROLE}}"
-fi
-
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
+APP_ROLE="${APP_ROLE:-all}"
+SERVICE_ROLE="${SERVICE_ROLE:-all}"
 ADMIN_PORT="${ADMIN_PORT:-${PORT:-3000}}"
 ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
 DATA_DIR="${DATA_DIR:-/data}"
@@ -35,15 +22,53 @@ PUBLIC_SS_HOST="${PUBLIC_SS_HOST:-}"
 PUBLIC_SS_PORT="${PUBLIC_SS_PORT:-}"
 SS_PASSWORD_CONFIGURED="${SS_PASSWORD_CONFIGURED:-true}"
 
-if [ "${SERVICE_ROLE}" = "node" ] || [ "${SERVICE_ROLE}" = "all" ]; then
-  SS_PASSWORD_JSON="$(json_escape "$SS_PASSWORD")"
-  SS_METHOD_JSON="$(json_escape "$SS_METHOD")"
-  SS_BIND_ADDRESS_JSON="$(json_escape "$SS_BIND_ADDRESS")"
-  SS_MODE_JSON="$(json_escape "$SS_MODE")"
-  SS_MANAGER_BIND_ADDRESS_JSON="$(json_escape "$SS_MANAGER_BIND_ADDRESS")"
+case "${APP_ROLE}" in
+  all) ;;
+  node-agent)
+    : "${ADMIN_BASE_URL:?ADMIN_BASE_URL is required}"
+    : "${NODE_ID:?NODE_ID is required}"
+    : "${NODE_TOKEN:?NODE_TOKEN is required}"
+    SERVICE_ROLE="node-agent"
+    ;;
+  *)
+    echo "APP_ROLE must be one of: all, node-agent" >&2
+    exit 64
+    ;;
+esac
 
+case "${SERVICE_ROLE}" in
+  node|admin|all|node-agent) ;;
+  *)
+    echo "SERVICE_ROLE must be one of: node, admin, all" >&2
+    exit 64
+    ;;
+esac
+
+if [ "${SERVICE_ROLE}" = "node" ] || [ "${SERVICE_ROLE}" = "admin" ] || [ "${SERVICE_ROLE}" = "all" ]; then
+  : "${SS_PASSWORD:?SS_PASSWORD is required}"
+fi
+if [ "${SERVICE_ROLE}" = "admin" ] || [ "${SERVICE_ROLE}" = "all" ]; then
+  : "${ADMIN_PASSWORD:?ADMIN_PASSWORD is required for SERVICE_ROLE=${SERVICE_ROLE}}"
+fi
+
+SS_PASSWORD_JSON="$(json_escape "${SS_PASSWORD:-}")"
+SS_METHOD_JSON="$(json_escape "$SS_METHOD")"
+SS_BIND_ADDRESS_JSON="$(json_escape "$SS_BIND_ADDRESS")"
+SS_MODE_JSON="$(json_escape "$SS_MODE")"
+SS_MANAGER_BIND_ADDRESS_JSON="$(json_escape "$SS_MANAGER_BIND_ADDRESS")"
+
+if [ "${SERVICE_ROLE}" = "node" ] || [ "${SERVICE_ROLE}" = "all" ] || [ "${SERVICE_ROLE}" = "node-agent" ]; then
   mkdir -p /etc/shadowsocks-rust
-  cat > /etc/shadowsocks-rust/config.json <<EOF
+  if [ "${SERVICE_ROLE}" = "node-agent" ]; then
+    cat > /etc/shadowsocks-rust/config.json <<EOF
+{
+  "manager_address": "${SS_MANAGER_BIND_ADDRESS_JSON}",
+  "manager_port": ${SS_MANAGER_PORT},
+  "servers": []
+}
+EOF
+  else
+    cat > /etc/shadowsocks-rust/config.json <<EOF
 {
   "manager_address": "${SS_MANAGER_BIND_ADDRESS_JSON}",
   "manager_port": ${SS_MANAGER_PORT},
@@ -59,6 +84,7 @@ if [ "${SERVICE_ROLE}" = "node" ] || [ "${SERVICE_ROLE}" = "all" ]; then
   ]
 }
 EOF
+  fi
 fi
 
 if [ "${SERVICE_ROLE}" = "admin" ] || [ "${SERVICE_ROLE}" = "all" ]; then
@@ -71,6 +97,9 @@ shutdown() {
   if [ -n "${ADMIN_PID:-}" ]; then
     kill "${ADMIN_PID}" 2>/dev/null || true
   fi
+  if [ -n "${AGENT_PID:-}" ]; then
+    kill "${AGENT_PID}" 2>/dev/null || true
+  fi
   if [ -n "${HEALTH_PID:-}" ]; then
     kill "${HEALTH_PID}" 2>/dev/null || true
   fi
@@ -82,10 +111,27 @@ shutdown() {
 
 trap shutdown INT TERM
 
-if [ "${SERVICE_ROLE}" = "node" ] || [ "${SERVICE_ROLE}" = "all" ]; then
-  echo "Starting node: shadowsocks-rust manager on ${SS_MANAGER_BIND_ADDRESS}:${SS_MANAGER_PORT}; proxy port ${SS_PORT}/${SS_MODE}"
+if [ "${SERVICE_ROLE}" = "node" ] || [ "${SERVICE_ROLE}" = "all" ] || [ "${SERVICE_ROLE}" = "node-agent" ]; then
+  echo "Starting shadowsocks-rust manager on ${SS_MANAGER_BIND_ADDRESS}:${SS_MANAGER_PORT}; proxy port ${SS_PORT}/${SS_MODE}"
   ssmanager -c /etc/shadowsocks-rust/config.json &
   SSMANAGER_PID="$!"
+fi
+
+if [ "${SERVICE_ROLE}" = "node-agent" ]; then
+  echo "Starting node agent for ${NODE_ID}"
+  (
+    cd /app/admin
+    ADMIN_BASE_URL="${ADMIN_BASE_URL}" \
+    AGENT_INTERVAL_MS="${AGENT_INTERVAL_MS:-15000}" \
+    NODE_ID="${NODE_ID}" \
+    NODE_TOKEN="${NODE_TOKEN}" \
+    SS_BIND_ADDRESS="${SS_BIND_ADDRESS}" \
+    SS_MANAGER_HOST="${SS_MANAGER_HOST}" \
+    SS_MANAGER_PORT="${SS_MANAGER_PORT}" \
+    SS_MANAGER_TIMEOUT_MS="${SS_MANAGER_TIMEOUT_MS:-2500}" \
+    node --experimental-strip-types src/nodeAgent.ts
+  ) &
+  AGENT_PID="$!"
 fi
 
 if [ "${SERVICE_ROLE}" = "admin" ] || [ "${SERVICE_ROLE}" = "all" ]; then
@@ -134,6 +180,14 @@ while :; do
     shutdown
     status=0
     wait "${ADMIN_PID}" || status="$?"
+    exit "${status}"
+  fi
+
+  if [ -n "${AGENT_PID:-}" ] && ! kill -0 "${AGENT_PID}" 2>/dev/null; then
+    echo "node agent exited"
+    shutdown
+    status=0
+    wait "${AGENT_PID}" || status="$?"
     exit "${status}"
   fi
 

@@ -61,3 +61,59 @@ test("manages users, subscription tokens, and access logs", () => {
 
   store.close();
 });
+
+test("manages nodes, user assignments, agent sync, and quota enforcement", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-admin-store-"));
+  const store = openStore(dir);
+
+  const createdNode = store.createNode({
+    name: "Hong Kong 1",
+    publicHost: "hk.example.com",
+    publicPortStart: 20000,
+    publicPortEnd: 20002,
+    ssMethod: "aes-256-gcm"
+  });
+  assert.ok(createdNode.token);
+
+  const createdUser = store.createUser({
+    name: "Bob",
+    nodeIds: [createdNode.node.id],
+    quotaBytes: 50,
+    quotaPeriod: "daily"
+  });
+  const assignments = store.getUserNodeAssignments(createdUser.user.id);
+  assert.equal(assignments.length, 1);
+  assert.equal(assignments[0].serverPort, 20000);
+
+  const firstSync = store.syncNodeAgent(createdNode.node.id, createdNode.token, {
+    load: { activeServers: 0, managerOnline: true },
+    traffic: {}
+  });
+  assert.equal(firstSync?.assignments.length, 1);
+  assert.equal(firstSync?.assignments[0].serverPort, 20000);
+
+  store.syncNodeAgent(createdNode.node.id, createdNode.token, {
+    load: { activeServers: 1, managerOnline: true },
+    traffic: { ports: { "20000": 10 } }
+  });
+  store.syncNodeAgent(createdNode.node.id, createdNode.token, {
+    load: { activeServers: 1, managerOnline: true },
+    traffic: { ports: { "20000": 80 } }
+  });
+
+  const detail = store.getUserDetail(createdUser.user.id);
+  assert.equal(detail?.user.status, "over_quota");
+  assert.equal(store.getTrafficByUser(createdUser.user.id, "24h").totalBytes, 70);
+
+  const afterQuota = store.syncNodeAgent(createdNode.node.id, createdNode.token, {
+    load: { activeServers: 1, managerOnline: true },
+    traffic: { ports: { "20000": 80 } }
+  });
+  assert.equal(afterQuota?.assignments.length, 0);
+
+  const disabledNode = store.updateNode(createdNode.node.id, { status: "disabled" });
+  assert.equal(disabledNode?.status, "disabled");
+  assert.equal(store.listNodes()[0].assignedUserCount, 1);
+
+  store.close();
+});
